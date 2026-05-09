@@ -188,10 +188,17 @@ fi
 
 if [ "$(vault_field sealed)" == "true" ]; then
     info "Unsealing Vault..."
-    vault operator unseal "$(cat .vault-keys)"
+    vault operator unseal "$(cat .vault-keys)" > /dev/null
 fi
 
 export VAULT_TOKEN="$(cat .vault.token)"
+
+# Dev mode auto-enables secret/; file backend does not. Enable KV v2 if absent.
+if ! vault secrets list -format=json 2>/dev/null \
+        | python3 -c "import sys,json; exit(0 if 'secret/' in json.load(sys.stdin) else 1)" 2>/dev/null; then
+    info "Enabling KV v2 secrets engine at secret/..."
+    vault secrets enable -path=secret kv-v2
+fi
 
 # ── 6. Collect configuration ──────────────────────────────────────────────────
 info "Collecting deployment configuration..."
