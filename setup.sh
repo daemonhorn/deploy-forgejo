@@ -111,6 +111,20 @@ info "Fingerprint: $(ssh-keygen -l -f ca.pub)"
 info "Setting up local Vault..."
 export VAULT_ADDR="http://127.0.0.1:8200"
 
+# Vault uses mlock() to prevent secrets being swapped to disk. On Linux this
+# requires CAP_IPC_LOCK; without it Vault refuses to start. Grant the capability
+# to the binary once (persists across runs) so Vault never needs to run as root.
+VAULT_BIN="$(command -v vault)"
+if command -v getcap &>/dev/null; then
+    if ! getcap "$VAULT_BIN" 2>/dev/null | grep -q "cap_ipc_lock"; then
+        info "Granting cap_ipc_lock to vault binary (requires sudo, one-time)..."
+        sudo setcap cap_ipc_lock=+ep "$VAULT_BIN"
+    fi
+else
+    warn "getcap not found (install libcap2-bin). If Vault fails to start with an"
+    warn "mlock error, run manually: sudo setcap cap_ipc_lock=+ep $VAULT_BIN"
+fi
+
 # vault status exit codes: 0 = unsealed, 2 = sealed, 1 = not running / error.
 # Treat exit code 2 (sealed) as "running" — only start if we get code 1.
 VAULT_EC=0; vault status &>/dev/null || VAULT_EC=$?
