@@ -72,6 +72,9 @@ info "Setting file permissions..."
 chmod 600 "$WORKDIR/.env" "$WORKDIR/app.ini"
 chmod 644 "$WORKDIR/docker-compose.yml" "$WORKDIR/nginx.conf" "$WORKDIR/nginx-http.conf"
 chmod 755 "$WORKDIR/certbot-renew.sh"
+# app.ini and ca.pub are bind-mounted :ro into the Forgejo container (UID 1000).
+# The entrypoint tries chown but fails on :ro mounts, so set ownership here.
+chown 1000:1000 "$WORKDIR/app.ini" "$WORKDIR/ca.pub"
 
 # ── 5. sudoers: allow nobody to run forgejo key lookup via Docker ─────────────
 info "Configuring sudoers for forgejo-keys..."
