@@ -122,11 +122,21 @@ info "Issuing TLS certificate for $DOMAIN..."
 # Give nginx a moment to be ready
 sleep 5
 
-# Certbot flags — staging mode adds --staging --force-renewal -v so we can
-# debug without burning production rate limits. Logs are always captured to
-# /tmp/certbot-logs on the host (mounted into the container).
+# Certbot log capture: mount both /var/log/letsencrypt (persistent log) and
+# /tmp (certbot's session log lives at /tmp/certbot-log-<rand>/log and is
+# otherwise lost when the --rm container exits).
 CERTBOT_LOG_DIR="/tmp/certbot-logs"
-mkdir -p "$CERTBOT_LOG_DIR"
+CERTBOT_TMP_DIR="/tmp/certbot-tmp"
+mkdir -p "$CERTBOT_LOG_DIR" "$CERTBOT_TMP_DIR"
+
+certbot_dump_logs() {
+    find "$CERTBOT_LOG_DIR" "$CERTBOT_TMP_DIR" \
+        \( -name "letsencrypt.log" -o -name "log" \) 2>/dev/null | sort \
+    | while read -r f; do
+        warn "━━━ $f ━━━"
+        cat "$f" 2>/dev/null || true
+    done
+}
 
 CERTBOT_EXTRA=""
 if [ -n "${CERTBOT_STAGING:-}" ]; then
@@ -141,6 +151,7 @@ if [ -n "${CERTBOT_STAGING:-}" ] || [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; th
         -v letsencrypt:/etc/letsencrypt \
         -v certbot-webroot:/var/www/certbot \
         -v "$CERTBOT_LOG_DIR":/var/log/letsencrypt \
+        -v "$CERTBOT_TMP_DIR":/tmp \
         certbot/certbot certonly \
             --webroot \
             --webroot-path=/var/www/certbot \
@@ -153,9 +164,8 @@ if [ -n "${CERTBOT_STAGING:-}" ] || [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; th
             $CERTBOT_EXTRA \
             -d "$DOMAIN" \
     || {
-        warn "Certbot failed. Container log ($CERTBOT_LOG_DIR/letsencrypt.log):"
-        cat "$CERTBOT_LOG_DIR/letsencrypt.log" 2>/dev/null \
-            || warn "(log file not found — check $CERTBOT_LOG_DIR)"
+        warn "Certbot failed. All captured logs:"
+        certbot_dump_logs
         error "Certbot failed for $DOMAIN. Ensure port 80 is reachable from the internet."
     }
     info "Certificate issued."
