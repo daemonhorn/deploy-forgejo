@@ -30,7 +30,7 @@ services:
       USER_GID: "1000"
     volumes:
       - /data/forgejo:/data
-      - /opt/forgejo/app.ini:/data/gitea/conf/app.ini:ro
+      - /opt/forgejo/app.ini:/data/gitea/conf/app.ini
       - /opt/forgejo/ca.pub:/data/gitea/ssh/trusted-user-ca-keys.pub:ro
       - /etc/localtime:/etc/localtime:ro
     # No port 22 exposed — SSH is handled by host sshd on port 2222.
