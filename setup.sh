@@ -241,8 +241,10 @@ prompt_if_empty REGION "Vultr region (see vultr.com/api/#tag/region)" "ewr"
 prompt_if_empty PLAN   "Instance plan" "vc2-1c-0.5gb"
 
 # ── 7. Store secrets in Vault ────────────────────────────────────────────────
-info "Generating database password..."
+info "Generating database password and Forgejo secrets..."
 DB_PASSWORD="$(openssl rand -base64 32 | tr -d '=/+')"
+FORGEJO_SECRET_KEY="$(openssl rand -hex 32)"
+FORGEJO_INTERNAL_TOKEN="$(openssl rand -base64 32 | tr -d '=/+')"
 
 if ! vault kv get secret/forgejo/cloud &>/dev/null; then
     if [ -f vultr_api_key ]; then
@@ -260,7 +262,9 @@ vault kv put secret/forgejo/config \
     db_password="$DB_PASSWORD" \
     db_user="forgejo" \
     db_name="forgejo" \
-    ssh_ca_pubkey="$(cat ca.pub)"
+    ssh_ca_pubkey="$(cat ca.pub)" \
+    secret_key="$FORGEJO_SECRET_KEY" \
+    internal_token="$FORGEJO_INTERNAL_TOKEN"
 
 vault kv put secret/forgejo/deploy \
     certbot_email="$CERTBOT_EMAIL" \

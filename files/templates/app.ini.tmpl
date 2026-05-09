@@ -24,7 +24,10 @@ DISABLE_REGISTRATION        = true
 
 [security]
 ; Prevents web-installer from running on first request before admin account exists.
-INSTALL_LOCK = true
+INSTALL_LOCK   = true
+; Pre-generated so Forgejo does not attempt to write them into the :ro-mounted app.ini.
+SECRET_KEY     = ${FORGEJO_SECRET_KEY}
+INTERNAL_TOKEN = ${FORGEJO_INTERNAL_TOKEN}
 
 [log]
 MODE  = console

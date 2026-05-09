@@ -61,6 +61,17 @@ vget() { vault kv get -field="$1" "$2"; }
 DB_PASSWORD="$(vget db_password secret/forgejo/config)"
 DB_USER="$(vget db_user secret/forgejo/config)"
 DB_NAME="$(vget db_name secret/forgejo/config)"
+FORGEJO_SECRET_KEY="$(vget secret_key secret/forgejo/config 2>/dev/null || true)"
+FORGEJO_INTERNAL_TOKEN="$(vget internal_token secret/forgejo/config 2>/dev/null || true)"
+# Generate and persist if setup.sh pre-dates these fields
+if [ -z "$FORGEJO_SECRET_KEY" ] || [ -z "$FORGEJO_INTERNAL_TOKEN" ]; then
+    warn "Forgejo secrets missing from Vault — generating and storing now..."
+    FORGEJO_SECRET_KEY="$(openssl rand -hex 32)"
+    FORGEJO_INTERNAL_TOKEN="$(openssl rand -base64 32 | tr -d '=/+')"
+    vault kv patch secret/forgejo/config \
+        secret_key="$FORGEJO_SECRET_KEY" \
+        internal_token="$FORGEJO_INTERNAL_TOKEN"
+fi
 export TF_VAR_vultr_api_key="$(vget vultr_api_key secret/forgejo/cloud)"
 
 CERTBOT_EMAIL="$(vget certbot_email secret/forgejo/deploy)"
@@ -106,13 +117,13 @@ TMPDIR="$(mktemp -d /tmp/forgejo-deploy-XXXXXX)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 # Export vars for envsubst
-export DOMAIN DB_PASSWORD DB_USER DB_NAME
+export DOMAIN DB_PASSWORD DB_USER DB_NAME FORGEJO_SECRET_KEY FORGEJO_INTERNAL_TOKEN
 
 envsubst '${DOMAIN}' \
     < files/templates/nginx-http.conf.tmpl > "$TMPDIR/nginx-http.conf"
 envsubst '${DOMAIN}' \
     < files/templates/nginx.conf.tmpl > "$TMPDIR/nginx.conf"
-envsubst '${DOMAIN} ${DB_PASSWORD} ${DB_USER} ${DB_NAME}' \
+envsubst '${DOMAIN} ${DB_PASSWORD} ${DB_USER} ${DB_NAME} ${FORGEJO_SECRET_KEY} ${FORGEJO_INTERNAL_TOKEN}' \
     < files/templates/app.ini.tmpl > "$TMPDIR/app.ini"
 envsubst '${DB_PASSWORD} ${DB_USER} ${DB_NAME}' \
     < files/templates/.env.tmpl > "$TMPDIR/.env"
