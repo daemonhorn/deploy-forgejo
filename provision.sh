@@ -158,6 +158,16 @@ ssh $SSH_OPTS "${SSH_USER}@${IP}" \
      FORGEJO_ADMIN_EMAIL='${FORGEJO_ADMIN_EMAIL}' \
      bash /opt/forgejo/deploy.sh"
 
+# ── Verify HTTPS endpoint ─────────────────────────────────────────────────────
+info "Verifying HTTPS endpoint at https://${IP} ..."
+HTTPS_HTTP_CODE="$(curl -sk --max-time 15 -o /dev/null -w '%{http_code}' "https://${IP}" || true)"
+if [ "$HTTPS_HTTP_CODE" = "200" ] || [ "$HTTPS_HTTP_CODE" = "302" ]; then
+    info "HTTPS check passed (HTTP $HTTPS_HTTP_CODE)."
+else
+    warn "HTTPS check returned unexpected code: $HTTPS_HTTP_CODE — full output:"
+    curl -vvv --max-time 15 "https://${IP}" 2>&1 || true
+fi
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

@@ -227,17 +227,21 @@ FORGEJO_CONTAINER="$(docker compose -f "$WORKDIR/docker-compose.yml" --project-d
 if ! docker exec "$FORGEJO_CONTAINER" \
         forgejo admin user list 2>/dev/null | grep -q "^1 "; then
     info "Creating Forgejo admin user '$FORGEJO_ADMIN_USER'..."
-    ADMIN_PASS="$(docker exec "$FORGEJO_CONTAINER" \
-        forgejo admin user create \
+    CREATE_OUT="$(docker exec -u git "$FORGEJO_CONTAINER" \
+        /usr/local/bin/forgejo admin user create \
             --username "$FORGEJO_ADMIN_USER" \
             --email "$FORGEJO_ADMIN_EMAIL" \
             --admin \
             --random-password \
-            2>&1 | grep -oP 'password: \K\S+' || true)"
+            2>&1 || true)"
+    # Forgejo prints: generated random password is '<password>'
+    ADMIN_PASS="$(echo "$CREATE_OUT" | grep -oP "generated random password is '\K[^']+"  || true)"
     if [ -n "$ADMIN_PASS" ]; then
         warn "Admin one-time password: $ADMIN_PASS  (change this immediately after login)"
+        warn "To reset: docker exec -u git forgejo /usr/local/bin/forgejo admin user change-password --username $FORGEJO_ADMIN_USER --password <newpass>"
     else
-        warn "Admin user created (check output above for password or use 'forgejo admin user change-password')"
+        warn "Admin user create output: $CREATE_OUT"
+        warn "To set password: docker exec -u git forgejo /usr/local/bin/forgejo admin user change-password --username $FORGEJO_ADMIN_USER --password <newpass>"
     fi
 else
     info "Admin user already exists, skipping."
