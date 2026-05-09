@@ -111,6 +111,31 @@ info "Fingerprint: $(ssh-keygen -l -f ca.pub)"
 info "Setting up local Vault..."
 export VAULT_ADDR="http://127.0.0.1:8200"
 
+# Stop Vault and wipe all local state so it can be re-initialized from scratch.
+destroy_vault() {
+    info "Destroying existing Vault data..."
+    if [ -f .vault.pid ]; then
+        kill "$(cat .vault.pid)" 2>/dev/null || true
+        sleep 1
+    fi
+    rm -rf .vault-data/ .vault-keys .vault.token .vault.pid
+    info "Vault data destroyed."
+}
+
+# A new CA invalidates every secret previously stored (ssh_ca_pubkey changes,
+# and a fresh deploy will need a new DB password anyway). Destroy automatically.
+# For an unchanged CA, give the user the choice.
+if [ -f .vault-keys ]; then
+    if $GENERATE_NEW_KEY; then
+        warn "New CA key generated — existing Vault secrets are stale. Recreating Vault."
+        destroy_vault
+    else
+        warn "Vault is already initialized."
+        read -rp "Destroy and recreate Vault? [y/N] " CHOICE
+        [[ "${CHOICE,,}" == "y" ]] && destroy_vault
+    fi
+fi
+
 # Vault uses mlock() to prevent secrets being swapped to disk. On Linux this
 # requires CAP_IPC_LOCK; without it Vault refuses to start. Grant the capability
 # to the binary once (persists across runs) so Vault never needs to run as root.
@@ -185,10 +210,25 @@ prompt_if_empty() {
     [ -n "${!var_name}" ] || error "$var_name cannot be empty"
 }
 
-prompt_if_empty CERTBOT_EMAIL        "Email for Let's Encrypt registration"
-prompt_if_empty ADMIN_SSH_PUBLIC_KEY "Admin SSH public key for VPS access (contents of id_ed25519.pub)"
-prompt_if_empty FORGEJO_ADMIN_USER   "Forgejo admin username" "gitadmin"
-prompt_if_empty FORGEJO_ADMIN_EMAIL  "Forgejo admin email"
+prompt_if_empty CERTBOT_EMAIL      "Email for Let's Encrypt registration"
+
+# Admin SSH key: default to ~/.ssh/id_ed25519.pub if present, show a short
+# preview so the user can confirm or type a different key.
+if [ -z "${ADMIN_SSH_PUBLIC_KEY:-}" ]; then
+    if [ -f "$HOME/.ssh/id_ed25519.pub" ]; then
+        _DEFAULT_KEY="$(cat "$HOME/.ssh/id_ed25519.pub")"
+        _PREVIEW="$(awk '{print $1, substr($2,1,20)"…", $3}' "$HOME/.ssh/id_ed25519.pub")"
+        read -rp "Admin SSH public key [~/.ssh/id_ed25519.pub — ${_PREVIEW}]: " INPUT
+        ADMIN_SSH_PUBLIC_KEY="${INPUT:-$_DEFAULT_KEY}"
+        unset _DEFAULT_KEY _PREVIEW INPUT
+    else
+        prompt_if_empty ADMIN_SSH_PUBLIC_KEY "Admin SSH public key for VPS access (contents of id_ed25519.pub)"
+    fi
+fi
+[ -n "${ADMIN_SSH_PUBLIC_KEY:-}" ] || error "ADMIN_SSH_PUBLIC_KEY cannot be empty"
+
+prompt_if_empty FORGEJO_ADMIN_USER  "Forgejo admin username" "gitadmin"
+prompt_if_empty FORGEJO_ADMIN_EMAIL "Forgejo admin email"
 
 # ── 7. Store secrets in Vault ────────────────────────────────────────────────
 info "Generating database password..."
