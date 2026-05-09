@@ -162,7 +162,7 @@ if [ -n "${CERTBOT_STAGING:-}" ] || [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; th
             --non-interactive \
             --preferred-profile shortlived \
             $CERTBOT_EXTRA \
-            -d "$DOMAIN" \
+            --ip-address "$DOMAIN" \
     || {
         warn "Certbot failed. All captured logs:"
         certbot_dump_logs

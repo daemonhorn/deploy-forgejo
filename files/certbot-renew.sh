@@ -11,7 +11,7 @@ certbot certonly \
     --no-eff-email \
     --non-interactive \
     --preferred-profile shortlived \
-    -d "$DOMAIN"
+    --ip-address "$DOMAIN"
 
 while :; do
     sleep 12h &
