@@ -44,8 +44,8 @@ ca.pub         ←  committed; deployed to VPS as TrustedUserCAKeys
 Vault (local, file backend in .vault-data/)
   secret/forgejo/config   → db_password, db_user, db_name, ssh_ca_pubkey
   secret/forgejo/cloud    → vultr_api_key
-  secret/forgejo/deploy   → domain, certbot_email, admin_ssh_public_key, ...
-     ↓ provision.sh reads at deploy time
+  secret/forgejo/deploy   → certbot_email, admin_ssh_public_key, ...
+     ↓ provision.sh reads at deploy time; DOMAIN derived from Terraform IP output
 VPS: /opt/forgejo/{.env, app.ini, ca.pub}
 ```
 
@@ -92,7 +92,7 @@ Before running `setup.sh`:
 - `vault` — from HashiCorp (file-backend mode, not dev mode)
 - `ykcs11` — `apt install ykcs11` (provides `libykcs11.so` for PKCS#11 signing)
 - `terraform` — from HashiCorp (>= 1.5)
-- `dig`, `envsubst`, `openssl`, `uuidgen` — standard packages
+- `envsubst`, `openssl`, `uuidgen` — standard packages
 
 ## Secrets and Security
 
@@ -110,10 +110,14 @@ Before running `setup.sh`:
 3. Set `provider_name = "<name>"` in `terraform/terraform.tfvars` and supply the provider's API key via `TF_VAR_` env vars
 4. No changes to `provision.sh`, `deploy.sh`, or any file under `files/`
 
+## TLS / Domain
+
+No DNS setup required. `DOMAIN` is set to the VPS public IP directly (`DOMAIN="$IP"` in `provision.sh`). Let's Encrypt issues an IP certificate using the short-lived profile (`--preferred-profile short-lived`, ~6-day validity). The certbot renewal systemd timer runs every 12 hours to keep it current.
+
 ## Known Verification Steps
 
 After deploy, run these to confirm correct configuration:
 1. `ssh-keygen -l -f ca.pub` — fingerprint must match `ykman piv info` slot 9d certificate
-2. Password login attempt at `https://<domain>` → must be rejected
+2. Password login attempt at `https://<ip>` → must be rejected
 3. `./sign-user-key.sh testuser test_key.pub` → cert issued; Git clone with cert succeeds
 4. Git clone with raw (unsigned) key → rejected by sshd-forgejo (no authorized_keys entry without cert)

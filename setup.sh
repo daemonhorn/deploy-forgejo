@@ -148,7 +148,6 @@ prompt_if_empty() {
     [ -n "${!var_name}" ] || error "$var_name cannot be empty"
 }
 
-prompt_if_empty DOMAIN            "Forgejo domain (e.g. git.example.com)"
 prompt_if_empty CERTBOT_EMAIL     "Email for Let's Encrypt registration"
 prompt_if_empty ADMIN_SSH_PUBLIC_KEY "Admin ed25519 public key for VPS access (contents of id_ed25519.pub)"
 prompt_if_empty FORGEJO_ADMIN_USER   "Forgejo admin username" "gitadmin"
@@ -178,7 +177,6 @@ vault kv put secret/forgejo/config \
     ssh_ca_pubkey="$(cat ca.pub)"
 
 vault kv put secret/forgejo/deploy \
-    domain="$DOMAIN" \
     certbot_email="$CERTBOT_EMAIL" \
     admin_ssh_public_key="$ADMIN_SSH_PUBLIC_KEY" \
     forgejo_admin_user="$FORGEJO_ADMIN_USER" \

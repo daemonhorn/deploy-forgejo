@@ -17,7 +17,7 @@ warn()  { echo -e "${YELLOW}[provision]${NC} $*"; }
 error() { echo -e "${RED}[provision]${NC} $*" >&2; exit 1; }
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
-for cmd in vault terraform ssh scp ssh-keyscan envsubst dig; do
+for cmd in vault terraform ssh scp ssh-keyscan envsubst; do
     command -v "$cmd" &>/dev/null || error "Required tool not found: $cmd"
 done
 
@@ -53,7 +53,6 @@ DB_USER="$(vget db_user secret/forgejo/config)"
 DB_NAME="$(vget db_name secret/forgejo/config)"
 export TF_VAR_vultr_api_key="$(vget vultr_api_key secret/forgejo/cloud)"
 
-DOMAIN="$(vget domain secret/forgejo/deploy)"
 CERTBOT_EMAIL="$(vget certbot_email secret/forgejo/deploy)"
 ADMIN_SSH_PUBLIC_KEY="$(vget admin_ssh_public_key secret/forgejo/deploy)"
 FORGEJO_ADMIN_USER="$(vget forgejo_admin_user secret/forgejo/deploy)"
@@ -72,6 +71,9 @@ IP="$(terraform output -raw public_ipv4)"
 SSH_USER="$(terraform output -raw ssh_user)"
 cd "$SCRIPT_DIR"
 
+# Domain is the IP itself — LE short-lived profile issues certs for IP identifiers directly.
+DOMAIN="$IP"
+
 info "VPS IP: $IP  SSH user: $SSH_USER"
 
 # ── Wait for SSH ──────────────────────────────────────────────────────────────
@@ -86,16 +88,6 @@ done
 info "SSH is up."
 
 SSH_OPTS="-i $SSH_KEY -o UserKnownHostsFile=./known_hosts.deploy -o StrictHostKeyChecking=yes"
-
-# ── DNS check ─────────────────────────────────────────────────────────────────
-RESOLVED_IP="$(dig +short "$DOMAIN" A 2>/dev/null | tail -1 || true)"
-if [ "$RESOLVED_IP" != "$IP" ]; then
-    warn "DNS check: $DOMAIN resolves to '${RESOLVED_IP:-<nothing>}', expected $IP."
-    warn "Let's Encrypt will fail until DNS propagates. Update your A record:"
-    warn "  $DOMAIN → $IP"
-    warn "Press Enter to continue anyway, or Ctrl-C to abort and fix DNS first."
-    read -r
-fi
 
 # ── Render templates ──────────────────────────────────────────────────────────
 info "Rendering configuration templates..."
@@ -146,9 +138,23 @@ ssh $SSH_OPTS "${SSH_USER}@${IP}" \
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-info "Forgejo is live at https://${DOMAIN}"
-echo "  SSH clone URL format:  git@${DOMAIN}:2222/<user>/<repo>.git"
+info "Forgejo is live at https://${IP}"
 echo
 echo "  To add a user:"
 echo "    ./sign-user-key.sh <username> /path/to/user_key.pub"
+echo
+echo "  ── Git SSH config ──────────────────────────"
+echo "  Add to ~/.ssh/config:"
+echo
+echo "    Host forgejo"
+echo "        HostName ${IP}"
+echo "        Port 2222"
+echo "        User git"
+echo "        IdentityFile ~/.ssh/id_ed25519"
+echo
+echo "  Then clone with:  git clone git@forgejo:/<user>/<repo>.git"
+echo
+echo "  Or set a git URL alias (no SSH config needed):"
+echo "    git config --global url.\"ssh://git@${IP}:2222/\".insteadOf \"forgejo:\""
+echo "  Then clone with:  git clone forgejo:<user>/<repo>"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

@@ -133,8 +133,9 @@ if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
             --agree-tos \
             --no-eff-email \
             --non-interactive \
+            --preferred-profile short-lived \
             -d "$DOMAIN" \
-        || error "Certbot failed. Ensure DNS A record '$DOMAIN → $(curl -4s icanhazip.com)' exists and has propagated."
+        || error "Certbot failed for IP $DOMAIN. Ensure port 80 is reachable from the internet."
     info "Certificate issued."
 else
     info "Certificate already exists, skipping issuance."
@@ -195,23 +196,24 @@ if [ ! -f /etc/systemd/system/certbot-renew.timer ]; then
     info "Installing certbot renewal systemd timer..."
     cat > /etc/systemd/system/certbot-renew.service << EOF
 [Unit]
-Description=Certbot renewal for Forgejo
+Description=Certbot renewal for Forgejo (short-lived IP cert)
 
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/docker run --rm \
   -v letsencrypt:/etc/letsencrypt \
   -v certbot-webroot:/var/www/certbot \
-  certbot/certbot renew --quiet --webroot --webroot-path=/var/www/certbot
+  certbot/certbot renew --quiet --webroot --webroot-path=/var/www/certbot \
+  --preferred-profile short-lived
 ExecStartPost=/usr/bin/docker exec \$(docker compose -f $WORKDIR/docker-compose.yml --project-directory $WORKDIR ps -q nginx) nginx -s reload
 EOF
     cat > /etc/systemd/system/certbot-renew.timer << 'EOF'
 [Unit]
-Description=Weekly certbot renewal
+Description=Certbot renewal — every 12 h (short-lived certs expire in 6 days)
 
 [Timer]
-OnCalendar=weekly
-RandomizedDelaySec=3600
+OnCalendar=*:0/12
+RandomizedDelaySec=600
 Persistent=true
 
 [Install]
