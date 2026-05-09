@@ -20,7 +20,9 @@ provider "vultr" {
 }
 
 module "infra" {
-  source = "./modules/providers/${var.provider_name}"
+  # Module source must be a literal — Terraform rejects variable interpolation here.
+  # To switch providers, change this path to ./modules/providers/<name>.
+  source = "./modules/providers/vultr"
 
   ssh_public_key = var.admin_ssh_public_key
   region         = var.region
