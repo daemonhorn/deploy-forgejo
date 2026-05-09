@@ -122,20 +122,42 @@ info "Issuing TLS certificate for $DOMAIN..."
 # Give nginx a moment to be ready
 sleep 5
 
-if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
+# Certbot flags — staging mode adds --staging --force-renewal -v so we can
+# debug without burning production rate limits. Logs are always captured to
+# /tmp/certbot-logs on the host (mounted into the container).
+CERTBOT_LOG_DIR="/tmp/certbot-logs"
+mkdir -p "$CERTBOT_LOG_DIR"
+
+CERTBOT_EXTRA=""
+if [ -n "${CERTBOT_STAGING:-}" ]; then
+    CERTBOT_EXTRA="--staging --force-renewal -v"
+    warn "Certbot staging mode — certificate will NOT be browser-trusted."
+fi
+
+# In staging mode always run (--force-renewal handles idempotency).
+# In production skip if a valid cert directory already exists.
+if [ -n "${CERTBOT_STAGING:-}" ] || [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
     docker run --rm \
         -v letsencrypt:/etc/letsencrypt \
         -v certbot-webroot:/var/www/certbot \
+        -v "$CERTBOT_LOG_DIR":/var/log/letsencrypt \
         certbot/certbot certonly \
             --webroot \
             --webroot-path=/var/www/certbot \
+            --logs-dir /var/log/letsencrypt \
             --email "$CERTBOT_EMAIL" \
             --agree-tos \
             --no-eff-email \
             --non-interactive \
             --preferred-profile shortlived \
+            $CERTBOT_EXTRA \
             -d "$DOMAIN" \
-        || error "Certbot failed for $DOMAIN. Ensure port 80 is reachable from the internet."
+    || {
+        warn "Certbot failed. Container log ($CERTBOT_LOG_DIR/letsencrypt.log):"
+        cat "$CERTBOT_LOG_DIR/letsencrypt.log" 2>/dev/null \
+            || warn "(log file not found — check $CERTBOT_LOG_DIR)"
+        error "Certbot failed for $DOMAIN. Ensure port 80 is reachable from the internet."
+    }
     info "Certificate issued."
 else
     info "Certificate already exists, skipping issuance."

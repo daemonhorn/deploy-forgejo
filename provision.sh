@@ -16,6 +16,16 @@ info()  { echo -e "${GREEN}[provision]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[provision]${NC} $*"; }
 error() { echo -e "${RED}[provision]${NC} $*" >&2; exit 1; }
 
+# ── CLI arguments ─────────────────────────────────────────────────────────────
+CERTBOT_STAGING=""
+for arg in "$@"; do
+    case "$arg" in
+        --debug) CERTBOT_STAGING=1
+                 warn "Debug mode: certbot will use staging CA and verbose logs." ;;
+        *)       error "Unknown argument: $arg. Usage: $0 [--debug]" ;;
+    esac
+done
+
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 for cmd in vault terraform ssh scp ssh-keyscan envsubst; do
     command -v "$cmd" &>/dev/null || error "Required tool not found: $cmd"
@@ -132,6 +142,7 @@ info "Running deploy.sh on VPS..."
 ssh $SSH_OPTS "${SSH_USER}@${IP}" \
     "DOMAIN='${DOMAIN}' \
      CERTBOT_EMAIL='${CERTBOT_EMAIL}' \
+     CERTBOT_STAGING='${CERTBOT_STAGING}' \
      FORGEJO_ADMIN_USER='${FORGEJO_ADMIN_USER}' \
      FORGEJO_ADMIN_EMAIL='${FORGEJO_ADMIN_EMAIL}' \
      bash /opt/forgejo/deploy.sh"
