@@ -147,12 +147,19 @@ fi
 # In staging mode always run (--force-renewal handles idempotency).
 # In production skip if a valid cert directory already exists.
 if [ -n "${CERTBOT_STAGING:-}" ] || [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
-    docker run --rm \
-        -v letsencrypt:/etc/letsencrypt \
-        -v certbot-webroot:/var/www/certbot \
-        -v "$CERTBOT_LOG_DIR":/var/log/letsencrypt \
-        -v "$CERTBOT_TMP_DIR":/tmp \
-        certbot/certbot certonly \
+    # Use 'docker compose run' (not bare 'docker run') so certbot shares the same
+    # compose project-scoped volumes as nginx. A bare 'docker run -v certbot-webroot:...'
+    # would create a different volume than the compose-managed 'forgejo_certbot-webroot'
+    # that nginx mounts, causing ACME challenge 404s.
+    docker compose -f "$WORKDIR/docker-compose.yml" \
+        --env-file "$WORKDIR/.env" \
+        --project-directory "$WORKDIR" \
+        run --rm \
+        --entrypoint="" \
+        --volume "$CERTBOT_LOG_DIR:/var/log/letsencrypt" \
+        --volume "$CERTBOT_TMP_DIR:/tmp" \
+        certbot \
+        certbot certonly \
             --webroot \
             --webroot-path=/var/www/certbot \
             --logs-dir /var/log/letsencrypt \
@@ -232,10 +239,12 @@ Description=Certbot renewal for Forgejo (short-lived IP cert)
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/docker run --rm \
-  -v letsencrypt:/etc/letsencrypt \
-  -v certbot-webroot:/var/www/certbot \
-  certbot/certbot renew --quiet --webroot --webroot-path=/var/www/certbot \
+ExecStart=/usr/bin/docker compose -f $WORKDIR/docker-compose.yml \
+  --env-file $WORKDIR/.env \
+  --project-directory $WORKDIR \
+  run --rm --entrypoint="" \
+  certbot \
+  certbot renew --quiet --webroot --webroot-path=/var/www/certbot \
   --preferred-profile shortlived
 ExecStartPost=/usr/bin/docker exec \$(docker compose -f $WORKDIR/docker-compose.yml --project-directory $WORKDIR ps -q nginx) nginx -s reload
 EOF
