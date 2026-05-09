@@ -10,7 +10,7 @@ Automates deployment of a [Forgejo](https://forgejo.org/) container instance on 
 
 **First time only:**
 ```
-./setup.sh          # Yubikey PIV key gen → Vault init → store secrets
+./setup.sh          # Yubikey PIV key gen → Vault init → store secrets → write terraform.tfvars
 ```
 
 **Deploy / reprovision:**

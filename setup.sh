@@ -237,6 +237,9 @@ fi
 prompt_if_empty FORGEJO_ADMIN_USER  "Forgejo admin username" "gitadmin"
 prompt_if_empty FORGEJO_ADMIN_EMAIL "Forgejo admin email"
 
+prompt_if_empty REGION "Vultr region (see vultr.com/api/#tag/region)" "ewr"
+prompt_if_empty PLAN   "Instance plan" "vc2-1c-0.5gb"
+
 # ── 7. Store secrets in Vault ────────────────────────────────────────────────
 info "Generating database password..."
 DB_PASSWORD="$(openssl rand -base64 32 | tr -d '=/+')"
@@ -267,7 +270,18 @@ vault kv put secret/forgejo/deploy \
 
 info "All secrets stored in Vault."
 
-# ── 8. Summary ────────────────────────────────────────────────────────────────
+# ── 8. Write terraform/terraform.tfvars ──────────────────────────────────────
+info "Writing terraform/terraform.tfvars..."
+cat > terraform/terraform.tfvars << EOF
+provider_name        = "vultr"
+region               = "${REGION}"
+plan                 = "${PLAN}"
+hostname             = "forgejo"
+admin_ssh_public_key = "${ADMIN_SSH_PUBLIC_KEY}"
+EOF
+info "terraform/terraform.tfvars written."
+
+# ── 9. Summary ────────────────────────────────────────────────────────────────
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 info "Setup complete."
@@ -276,8 +290,7 @@ echo "  Fingerprint   : $(ssh-keygen -l -f ca.pub)"
 echo "  PKCS#11 lib   : $PKCS11_LIB"
 echo "  Vault addr    : $VAULT_ADDR"
 echo
-echo "  Next steps:"
-echo "    1. Copy terraform/terraform.tfvars.example → terraform/terraform.tfvars"
-echo "       and fill in region, plan, admin_ssh_public_key."
-echo "    2. Run: ./provision.sh"
+echo "  terraform/terraform.tfvars written (region: ${REGION}, plan: ${PLAN})"
+echo
+echo "  Next step:  ./provision.sh"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
