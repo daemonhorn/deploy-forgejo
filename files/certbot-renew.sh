@@ -10,12 +10,12 @@ certbot certonly \
     --agree-tos \
     --no-eff-email \
     --non-interactive \
-    --preferred-profile short-lived \
+    --preferred-profile shortlived \
     -d "$DOMAIN"
 
 while :; do
     sleep 12h &
     wait $!
     certbot renew --quiet --webroot --webroot-path=/var/www/certbot \
-        --preferred-profile short-lived
+        --preferred-profile shortlived
 done

@@ -71,7 +71,8 @@ IP="$(terraform output -raw public_ipv4)"
 SSH_USER="$(terraform output -raw ssh_user)"
 cd "$SCRIPT_DIR"
 
-# Domain is the IP itself — LE short-lived profile issues certs for IP identifiers directly.
+# Domain is the VPS IP. LE issues IP certificates under the 'shortlived' profile
+# (160-hour validity); no DNS setup required.
 DOMAIN="$IP"
 
 info "VPS IP: $IP  SSH user: $SSH_USER"

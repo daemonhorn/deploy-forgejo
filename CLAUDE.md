@@ -112,7 +112,7 @@ Before running `setup.sh`:
 
 ## TLS / Domain
 
-No DNS setup required. `DOMAIN` is set to the VPS public IP directly (`DOMAIN="$IP"` in `provision.sh`). Let's Encrypt issues an IP certificate using the short-lived profile (`--preferred-profile short-lived`, ~6-day validity). The certbot renewal systemd timer runs every 12 hours to keep it current.
+No DNS setup required. `DOMAIN` is set to the VPS public IP directly (`DOMAIN="$IP"` in `provision.sh`). Let's Encrypt issues an IP certificate using the short-lived profile (`--preferred-profile shortlived`, 160-hour validity). IP certs are required to use this profile. The certbot renewal systemd timer runs every 12 hours to keep it current.
 
 ## Known Verification Steps
 

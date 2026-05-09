@@ -133,9 +133,9 @@ if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
             --agree-tos \
             --no-eff-email \
             --non-interactive \
-            --preferred-profile short-lived \
+            --preferred-profile shortlived \
             -d "$DOMAIN" \
-        || error "Certbot failed for IP $DOMAIN. Ensure port 80 is reachable from the internet."
+        || error "Certbot failed for $DOMAIN. Ensure port 80 is reachable from the internet."
     info "Certificate issued."
 else
     info "Certificate already exists, skipping issuance."
@@ -204,7 +204,7 @@ ExecStart=/usr/bin/docker run --rm \
   -v letsencrypt:/etc/letsencrypt \
   -v certbot-webroot:/var/www/certbot \
   certbot/certbot renew --quiet --webroot --webroot-path=/var/www/certbot \
-  --preferred-profile short-lived
+  --preferred-profile shortlived
 ExecStartPost=/usr/bin/docker exec \$(docker compose -f $WORKDIR/docker-compose.yml --project-directory $WORKDIR ps -q nginx) nginx -s reload
 EOF
     cat > /etc/systemd/system/certbot-renew.timer << 'EOF'
