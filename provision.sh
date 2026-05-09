@@ -159,13 +159,16 @@ ssh $SSH_OPTS "${SSH_USER}@${IP}" \
      bash /opt/forgejo/deploy.sh"
 
 # ── Verify HTTPS endpoint ─────────────────────────────────────────────────────
-info "Verifying HTTPS endpoint at https://${IP} ..."
+info "Verifying HTTPS endpoint externally at https://${IP} ..."
 HTTPS_HTTP_CODE="$(curl -sk --max-time 15 -o /dev/null -w '%{http_code}' "https://${IP}" || true)"
 if [ "$HTTPS_HTTP_CODE" = "200" ] || [ "$HTTPS_HTTP_CODE" = "302" ]; then
-    info "HTTPS check passed (HTTP $HTTPS_HTTP_CODE)."
+    info "External HTTPS check passed (HTTP $HTTPS_HTTP_CODE)."
 else
-    warn "HTTPS check returned unexpected code: $HTTPS_HTTP_CODE — full output:"
-    curl -vvv --max-time 15 "https://${IP}" 2>&1 || true
+    warn "External HTTPS check returned code: $HTTPS_HTTP_CODE — running verbose check from VPS:"
+    # shellcheck disable=SC2086
+    ssh $SSH_OPTS "${SSH_USER}@${IP}" \
+        "curl -vvv -k --max-time 15 https://localhost 2>&1; echo; echo '--- nginx status ---'; docker ps --filter name=nginx --format '{{.Status}}'; docker exec \$(docker ps -qf name=nginx) nginx -t 2>&1 || true" \
+        || true
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────

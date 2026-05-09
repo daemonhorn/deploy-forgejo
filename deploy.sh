@@ -192,10 +192,34 @@ docker compose -f "$WORKDIR/docker-compose.yml" \
     --project-directory "$WORKDIR" \
     up -d
 
-# Allow nginx to reload with the TLS config now that cert exists
-sleep 3
-docker exec "$(docker compose -f "$WORKDIR/docker-compose.yml" --project-directory "$WORKDIR" ps -q nginx)" \
-    nginx -s reload 2>/dev/null || true
+# Reload nginx with TLS config. Test first so errors are visible.
+NGINX_CTR="$(docker compose -f "$WORKDIR/docker-compose.yml" --project-directory "$WORKDIR" ps -q nginx)"
+info "Testing nginx TLS config..."
+docker exec "$NGINX_CTR" nginx -t \
+    || error "nginx config test failed — check the TLS config and cert paths above"
+info "Reloading nginx..."
+docker exec "$NGINX_CTR" nginx -s reload \
+    || error "nginx reload failed"
+
+# Wait until port 443 is actually accepting connections (reload is async).
+info "Waiting for nginx to accept connections on port 443..."
+ATTEMPTS=0
+until nc -z localhost 443 2>/dev/null; do
+    ATTEMPTS=$((ATTEMPTS + 1))
+    [ "$ATTEMPTS" -lt 15 ] || error "nginx did not start listening on port 443 after 30s"
+    sleep 2
+done
+info "nginx is accepting TLS connections on port 443."
+
+# Smoke-test HTTPS locally on the VPS (avoids any external routing issues).
+info "Smoke-testing HTTPS endpoint..."
+HTTP_CODE="$(curl -sk --max-time 10 -o /dev/null -w '%{http_code}' "https://localhost" || true)"
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+    info "HTTPS smoke test passed (HTTP $HTTP_CODE)."
+else
+    warn "HTTPS smoke test returned code: $HTTP_CODE — verbose output:"
+    curl -vvv -k --max-time 10 "https://localhost" 2>&1 || true
+fi
 
 # ── 10. Wait for Forgejo to be ready ──────────────────────────────────────────
 info "Waiting for Forgejo web UI..."
