@@ -199,7 +199,21 @@ info "Waiting for Forgejo web UI..."
 ATTEMPTS=0
 until curl -sf --max-time 5 "http://localhost:3000" -o /dev/null; do
     ATTEMPTS=$((ATTEMPTS + 1))
-    [ "$ATTEMPTS" -lt 24 ] || error "Forgejo did not become healthy after 120s"
+    if [ "$ATTEMPTS" -ge 24 ]; then
+        warn "━━━ docker ps ━━━"
+        docker ps -a
+        warn "━━━ forgejo container state ━━━"
+        docker inspect forgejo --format \
+            'Status={{.State.Status}} ExitCode={{.State.ExitCode}} Error={{.State.Error}}'
+        warn "━━━ forgejo logs (last 60 lines) ━━━"
+        docker logs --tail 60 forgejo 2>&1 || true
+        warn "━━━ db logs (last 20 lines) ━━━"
+        docker compose -f "$WORKDIR/docker-compose.yml" --project-directory "$WORKDIR" \
+            logs --tail 20 db 2>&1 || true
+        warn "━━━ curl verbose ━━━"
+        curl -v --max-time 5 "http://localhost:3000" 2>&1 || true
+        error "Forgejo did not become healthy after 120s"
+    fi
     sleep 5
 done
 info "Forgejo is responding."
