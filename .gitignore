@@ -1,0 +1,29 @@
+# Secrets and credentials
+vultr_api_key
+*.tfvars
+!*.tfvars.example
+
+# Vault local state
+.vault-data/
+.vault.token
+.vault.pid
+.vault-keys
+
+# Yubikey setup artifacts
+.ykcs11_lib
+ca_public.pem
+
+# Terraform state and cache
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# Deploy artifacts
+known_hosts.deploy
+
+# Rendered templates (never committed; generated at deploy time)
+files/.env
+files/app.ini
+files/nginx.conf
+files/nginx-http.conf

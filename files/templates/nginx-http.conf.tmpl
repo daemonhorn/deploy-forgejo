@@ -1,0 +1,14 @@
+# HTTP-only config used during initial certbot certificate issuance.
+# Replaced by nginx.conf.tmpl after cert is obtained.
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 503;
+    }
+}

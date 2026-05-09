@@ -1,0 +1,31 @@
+APP_NAME = Forgejo
+
+[server]
+DOMAIN         = ${DOMAIN}
+ROOT_URL       = https://${DOMAIN}
+HTTP_PORT      = 3000
+SSH_DOMAIN     = ${DOMAIN}
+SSH_PORT       = 2222
+; SSH handled by host sshd (see sshd_forgejo.conf deployed by deploy.sh).
+; Forgejo's built-in SSH server is disabled.
+START_SSH_SERVER                  = false
+SSH_TRUSTED_USER_CA_KEYS_FILENAME = /data/gitea/ssh/trusted-user-ca-keys.pub
+
+[database]
+DB_TYPE = postgres
+HOST    = db:5432
+NAME    = ${DB_NAME}
+USER    = ${DB_USER}
+PASSWD  = ${DB_PASSWORD}
+
+[service]
+ENABLE_BASIC_AUTHENTICATION = false
+DISABLE_REGISTRATION        = true
+
+[security]
+; Prevents web-installer from running on first request before admin account exists.
+INSTALL_LOCK = true
+
+[log]
+MODE  = console
+LEVEL = warn

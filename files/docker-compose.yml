@@ -1,0 +1,62 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:15
+    container_name: forgejo
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+    volumes:
+      - /data/forgejo:/data
+      - /opt/forgejo/app.ini:/data/gitea/conf/app.ini:ro
+      - /opt/forgejo/ca.pub:/data/gitea/ssh/trusted-user-ca-keys.pub:ro
+      - /etc/localtime:/etc/localtime:ro
+    # No port 22 exposed — SSH is handled by host sshd on port 2222.
+    # Web UI proxied by nginx on port 3000 (internal only).
+    networks:
+      - internal
+      - web
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /opt/forgejo/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot-webroot:/var/www/certbot
+    networks:
+      - web
+
+  certbot:
+    image: certbot/certbot
+    restart: unless-stopped
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --quiet --webroot --webroot-path=/var/www/certbot; sleep 12h & wait $${!}; done"
+
+volumes:
+  pgdata:
+  letsencrypt:
+  certbot-webroot:
+
+networks:
+  internal:
+  web:

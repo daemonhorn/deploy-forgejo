@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values.
+# Do NOT set vultr_api_key here — supply it via TF_VAR_vultr_api_key env var.
+
+provider_name = "vultr"
+region        = "ewr"   # Vultr New Jersey; see: vultr.com/api/#tag/region
+plan          = "vc2-1c-1gb"
+hostname      = "forgejo"
+
+# ed25519 public key for VPS admin SSH access (not the Forgejo CA key).
+# Example: contents of ~/.ssh/id_ed25519.pub
+admin_ssh_public_key = "ssh-ed25519 AAAA... user@host"
