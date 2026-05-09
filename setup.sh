@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
-# setup.sh — Run ONCE before first provision.
+# setup.sh — Run before first provision; safe to re-run.
 #
-# Does three things:
-#   1. Generates an ECCP384 SSH CA key in Yubikey PIV slot 9d.
-#   2. Starts a local Vault instance (file backend, persists across reboots).
-#   3. Stores all secrets in Vault so provision.sh can retrieve them.
-#
-# Re-running is safe: Vault init is skipped if already done; slot 9d keygen
-# prompts for confirmation if a key already exists there.
+# 1. Ensures Yubikey PIV slot 9d has an ECCP384 SSH CA key (generate or reuse).
+# 2. Starts a local Vault instance (file backend, persists across reboots).
+# 3. Stores all deployment secrets in Vault for provision.sh to retrieve.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# ── colours ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[setup]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[setup]${NC} $*"; }
@@ -21,42 +16,14 @@ error() { echo -e "${RED}[setup]${NC} $*" >&2; exit 1; }
 
 # ── 1. Prerequisite check ─────────────────────────────────────────────────────
 info "Checking prerequisites..."
-for cmd in ykman vault ssh-keygen openssl uuidgen; do
+for cmd in ykman vault ssh-keygen openssl; do
     command -v "$cmd" &>/dev/null || error "Required tool not found: $cmd"
 done
 
-if ! ykman info &>/dev/null; then
-    error "No Yubikey detected. Connect your Yubikey and try again."
-fi
+ykman info &>/dev/null || error "No Yubikey detected. Connect your Yubikey and try again."
 
-# ── 2. Slot 9d: generate key ──────────────────────────────────────────────────
-info "Checking Yubikey PIV slot 9d..."
-
-SLOT="9d"
-PIV_INFO="$(ykman piv info 2>&1 || true)"
-
-if echo "$PIV_INFO" | grep -q "Key Management.*Generated\|Key Management.*Imported"; then
-    warn "Slot 9d already contains a key."
-    read -rp "Overwrite existing key in slot 9d? This is IRREVERSIBLE. [y/N] " CONFIRM
-    [[ "${CONFIRM,,}" == "y" ]] || error "Aborted. Existing slot 9d key preserved."
-fi
-
-info "Generating ECCP384 key in PIV slot 9d (requires Yubikey touch/PIN)..."
-TMP_PUB="$(mktemp /tmp/yk_9d_XXXXXX.pem)"
-trap 'rm -f "$TMP_PUB"' EXIT
-
-ykman piv keys generate \
-    --algorithm ECCP384 \
-    --pin-policy once \
-    --touch-policy cached \
-    "$SLOT" "$TMP_PUB"
-
-info "Creating self-signed X.509 certificate in slot 9d (required for PKCS#11 enumeration)..."
-ykman piv certificates generate \
-    --subject "CN=Forgejo SSH CA" \
-    "$SLOT" "$TMP_PUB"
-
-# ── 3. Detect PKCS#11 library ─────────────────────────────────────────────────
+# ── 2. Detect PKCS#11 library ─────────────────────────────────────────────────
+# Done before slot check because the re-export path (use-existing) also needs it.
 info "Detecting PKCS#11 library..."
 
 PKCS11_CANDIDATES=(
@@ -75,56 +42,112 @@ for lib in "${PKCS11_CANDIDATES[@]}"; do
         break
     fi
 done
-
-if [ -z "$PKCS11_LIB" ]; then
-    error "No PKCS#11 library found. Install ykcs11: apt install ykcs11"
-fi
-
+[ -n "$PKCS11_LIB" ] || error "No PKCS#11 library found. Install ykcs11: apt install ykcs11"
 echo "$PKCS11_LIB" > .ykcs11_lib
 
-# ── 4. Export SSH-format CA public key ───────────────────────────────────────
+# ── 3. Yubikey PIV slot 9d: detect and decide ─────────────────────────────────
+SLOT="9d"
+TMP_PUB="$(mktemp /tmp/yk_9d_XXXXXX.pem)"
+trap 'rm -f "$TMP_PUB"' EXIT
+
+# Probe slot 9d by attempting a public-key export — more reliable than parsing
+# text output of `ykman piv info`, which varies across firmware versions.
+SLOT_HAS_KEY=false
+if ykman piv keys export "$SLOT" "$TMP_PUB" 2>/dev/null && [ -s "$TMP_PUB" ]; then
+    SLOT_HAS_KEY=true
+fi
+
+GENERATE_NEW_KEY=false
+
+if $SLOT_HAS_KEY; then
+    if [ -f ca.pub ] && [ -f ca_public.pem ]; then
+        warn "Existing PKI detected: slot 9d has a key and local CA files exist."
+        read -rp "Use existing PKI? [Y/n] " CHOICE
+        if [[ "${CHOICE,,}" == "n" ]]; then
+            warn "Generating a new key will IRREVERSIBLY destroy the existing CA."
+            warn "Any certificates already signed by the old CA will stop working."
+            read -rp "Confirm overwrite of slot 9d? [y/N] " CONFIRM
+            [[ "${CONFIRM,,}" == "y" ]] || error "Aborted. Existing PKI preserved."
+            GENERATE_NEW_KEY=true
+        else
+            info "Using existing PKI."
+        fi
+    else
+        # Slot has a key but local files are missing — re-export rather than regenerate.
+        # TMP_PUB already holds the exported PEM from the probe above.
+        warn "Slot 9d has a key but local CA files are missing — re-exporting public keys."
+    fi
+else
+    info "No key found in slot 9d — generating new CA key."
+    GENERATE_NEW_KEY=true
+fi
+
+# ── 4. Generate new CA key, or accept the already-exported public key ──────────
+if $GENERATE_NEW_KEY; then
+    info "Generating ECCP384 key in PIV slot 9d (requires Yubikey touch/PIN)..."
+    ykman piv keys generate \
+        --algorithm ECCP384 \
+        --pin-policy once \
+        --touch-policy cached \
+        "$SLOT" "$TMP_PUB"
+
+    info "Creating self-signed X.509 certificate in slot 9d (required for PKCS#11 enumeration)..."
+    ykman piv certificates generate \
+        --subject "CN=Forgejo SSH CA" \
+        "$SLOT" "$TMP_PUB"
+fi
+
+# TMP_PUB now holds the correct PEM public key for either path.
+cp "$TMP_PUB" ca_public.pem
+info "PEM public key written to ca_public.pem (used by sign-user-key.sh)"
+
+# Export SSH-format CA public key from the Yubikey (always refresh).
 info "Exporting SSH-format CA public key from Yubikey..."
 ssh-keygen -D "$PKCS11_LIB" > ca.pub
 info "CA public key written to ca.pub"
 info "Fingerprint: $(ssh-keygen -l -f ca.pub)"
 
-# Also keep the PEM public key locally for use by ssh-keygen -s when signing certs.
-cp "$TMP_PUB" ca_public.pem
-# ca_public.pem is gitignored; it's a public key so loss is fine (re-export from Yubikey)
-info "PEM public key written to ca_public.pem (used by sign-user-key.sh)"
-
-# ── 5. Start Vault (file backend, persists across reboots) ───────────────────
+# ── 5. Start and initialize Vault ─────────────────────────────────────────────
 info "Setting up local Vault..."
-
 export VAULT_ADDR="http://127.0.0.1:8200"
 
-# Start Vault if not already running
-if ! vault status &>/dev/null; then
+# vault status exit codes: 0 = unsealed, 2 = sealed, 1 = not running / error.
+# Treat exit code 2 (sealed) as "running" — only start if we get code 1.
+VAULT_EC=0; vault status &>/dev/null || VAULT_EC=$?
+if [ "$VAULT_EC" -eq 1 ]; then
+    info "Starting Vault..."
     vault server -config vault.hcl > /tmp/vault.log 2>&1 &
     echo $! > .vault.pid
+    # Wait until Vault accepts connections (exit code 0 or 2, not 1).
+    for _i in $(seq 1 15); do
+        VAULT_EC=0; vault status &>/dev/null || VAULT_EC=$?
+        [ "$VAULT_EC" -ne 1 ] && break
+        sleep 1
+    done
+    [ "$VAULT_EC" -ne 1 ] || error "Vault did not start within 15 s. Check /tmp/vault.log"
     info "Vault started (PID $(cat .vault.pid))"
-    sleep 3
 fi
 
-# Initialize Vault if first run
-if ! vault status 2>/dev/null | grep -q "Initialized.*true"; then
-    info "Initializing Vault (1 key share, 1 threshold for local use)..."
+# Parse Vault status as JSON to avoid pipefail traps on exit code 2 (sealed).
+# vault status exits 2 when sealed; piping it with pipefail would misreport the
+# pipeline result regardless of grep/python succeeding.
+vault_json() { vault status -format=json 2>/dev/null || true; }
+vault_field() { vault_json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$1',''))" 2>/dev/null || true; }
+
+if [ "$(vault_field initialized)" != "true" ]; then
+    info "Initializing Vault (1 key share, threshold 1)..."
     INIT_OUTPUT="$(vault operator init -key-shares=1 -key-threshold=1 -format=json)"
-
-    UNSEAL_KEY="$(echo "$INIT_OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['unseal_keys_b64'][0])")"
-    ROOT_TOKEN="$(echo "$INIT_OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['root_token'])")"
-
+    UNSEAL_KEY="$(echo "$INIT_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['unseal_keys_b64'][0])")"
+    ROOT_TOKEN="$(echo "$INIT_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")"
     printf '%s\n' "$UNSEAL_KEY" > .vault-keys
     chmod 600 .vault-keys
     printf '%s\n' "$ROOT_TOKEN" > .vault.token
     chmod 600 .vault.token
-
     warn "Vault unseal key saved to .vault-keys (gitignored). BACK THIS UP SECURELY."
     warn "Loss of .vault-keys means Vault cannot be unsealed after restart."
 fi
 
-# Unseal if sealed
-if vault status 2>/dev/null | grep -q "Sealed.*true"; then
+if [ "$(vault_field sealed)" == "true" ]; then
     info "Unsealing Vault..."
     vault operator unseal "$(cat .vault-keys)"
 fi
@@ -148,8 +171,8 @@ prompt_if_empty() {
     [ -n "${!var_name}" ] || error "$var_name cannot be empty"
 }
 
-prompt_if_empty CERTBOT_EMAIL     "Email for Let's Encrypt registration"
-prompt_if_empty ADMIN_SSH_PUBLIC_KEY "Admin ed25519 public key for VPS access (contents of id_ed25519.pub)"
+prompt_if_empty CERTBOT_EMAIL        "Email for Let's Encrypt registration"
+prompt_if_empty ADMIN_SSH_PUBLIC_KEY "Admin SSH public key for VPS access (contents of id_ed25519.pub)"
 prompt_if_empty FORGEJO_ADMIN_USER   "Forgejo admin username" "gitadmin"
 prompt_if_empty FORGEJO_ADMIN_EMAIL  "Forgejo admin email"
 
@@ -157,7 +180,6 @@ prompt_if_empty FORGEJO_ADMIN_EMAIL  "Forgejo admin email"
 info "Generating database password..."
 DB_PASSWORD="$(openssl rand -base64 32 | tr -d '=/+')"
 
-# Check if Vultr API key is already in Vault; if not, read from file
 if ! vault kv get secret/forgejo/cloud &>/dev/null; then
     if [ -f vultr_api_key ]; then
         VULTR_API_KEY="$(tr -d '[:space:]' < vultr_api_key)"
