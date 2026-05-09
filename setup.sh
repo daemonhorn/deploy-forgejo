@@ -171,7 +171,7 @@ fi
 # vault status exits 2 when sealed; piping it with pipefail would misreport the
 # pipeline result regardless of grep/python succeeding.
 vault_json() { vault status -format=json 2>/dev/null || true; }
-vault_field() { vault_json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$1',''))" 2>/dev/null || true; }
+vault_field() { vault_json | python3 -c "import sys,json; d=json.load(sys.stdin); print(str(d.get('$1','')).lower())" 2>/dev/null || true; }
 
 if [ "$(vault_field initialized)" != "true" ]; then
     info "Initializing Vault (1 key share, threshold 1)..."
