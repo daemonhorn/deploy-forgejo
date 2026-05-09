@@ -10,13 +10,21 @@ services:
       - pgdata:/var/lib/postgresql/data
     networks:
       - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
   forgejo:
     image: codeberg.org/forgejo/forgejo:15
     container_name: forgejo
     restart: unless-stopped
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
     environment:
       USER_UID: "1000"
       USER_GID: "1000"
@@ -26,7 +34,7 @@ services:
       - /opt/forgejo/ca.pub:/data/gitea/ssh/trusted-user-ca-keys.pub:ro
       - /etc/localtime:/etc/localtime:ro
     # No port 22 exposed — SSH is handled by host sshd on port 2222.
-    # Web UI proxied by nginx on port 3000 (internal only).
+    # Port 3000 bound to loopback only; nginx proxies it externally.
     networks:
       - internal
       - web
