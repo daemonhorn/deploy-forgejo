@@ -18,13 +18,23 @@ resource "azurerm_virtual_network" "main" {
   address_space       = ["10.0.0.0/16"]
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
-}
 
-resource "azurerm_subnet" "main" {
-  name                 = "${var.hostname}-subnet"
-  resource_group_name  = azurerm_resource_group.main.name
-  virtual_network_name = azurerm_virtual_network.main.name
-  address_prefixes     = ["10.0.1.0/24"]
+  # Inline subnet avoids the eventual-consistency race where the VNet creation
+  # API returns 200 but the resource isn't yet visible when a separate
+  # azurerm_subnet resource immediately POSTs against it (404 on polling).
+  # The NSG is associated here so VNet destruction atomically removes the
+  # subnet + its NSG link before the NSG delete runs — no ordering race.
+  subnet {
+    name             = "${var.hostname}-subnet"
+    address_prefixes = ["10.0.1.0/24"]
+    security_group   = azurerm_network_security_group.main.id
+  }
+
+  # Azure may back-fill subnet defaults on subsequent reads; ignore to prevent
+  # spurious drift on `terraform plan` after the initial apply.
+  lifecycle {
+    ignore_changes = [subnet]
+  }
 }
 
 # Static public IP so the Let's Encrypt IP certificate stays valid across reboots.
@@ -45,13 +55,20 @@ locals {
     tostring(port) => { port = port, priority = 100 + idx }
   }
 
+  # Extract the inline subnet ID from the VNet resource.
+  subnet_id = one([for s in azurerm_virtual_network.main.subnet : s.id])
+
   # Bootstrap script: Azure VMs cannot be created with admin_username=root, so we
   # provision as 'azureadmin' and copy the authorized_keys to root via custom_data.
   # This mirrors the AWS user_data pattern so provision.sh can SSH as root uniformly.
   root_bootstrap = base64encode(<<-EOT
     #!/bin/bash
     set -e
-    while [ ! -f /home/azureadmin/.ssh/authorized_keys ]; do sleep 1; done
+    for i in $(seq 1 60); do
+      [ -f /home/azureadmin/.ssh/authorized_keys ] && break
+      sleep 1
+    done
+    [ -f /home/azureadmin/.ssh/authorized_keys ] || { echo "ERROR: authorized_keys never appeared" >&2; exit 1; }
     mkdir -p /root/.ssh
     cp /home/azureadmin/.ssh/authorized_keys /root/.ssh/authorized_keys
     chmod 700 /root/.ssh
@@ -90,21 +107,10 @@ resource "azurerm_network_interface" "main" {
 
   ip_configuration {
     name                          = "main"
-    subnet_id                     = azurerm_subnet.main.id
+    subnet_id                     = local.subnet_id
     private_ip_address_allocation = "Dynamic"
     public_ip_address_id          = azurerm_public_ip.main.id
   }
-}
-
-# Associate NSG at the subnet level rather than per-NIC.
-# With a per-NIC association, Terraform can destroy the NIC and NSG in parallel;
-# Azure rejects the NSG deletion if the NIC's association record hasn't cleared yet
-# (even after the NIC DELETE returns 200). The subnet association resource depends
-# on both the subnet and the NSG, so Terraform's graph guarantees it is destroyed
-# before either — the NIC has no NSG reference and is not in that ordering chain.
-resource "azurerm_subnet_network_security_group_association" "main" {
-  subnet_id                 = azurerm_subnet.main.id
-  network_security_group_id = azurerm_network_security_group.main.id
 }
 
 resource "azurerm_linux_virtual_machine" "main" {
@@ -141,6 +147,10 @@ resource "azurerm_linux_virtual_machine" "main" {
   # Copies SSH key to root and re-enables PermitRootLogin prohibit-password
   # so provision.sh can connect as root consistently across all providers.
   custom_data = local.root_bootstrap
+
+  # Empty block enables boot diagnostics with a managed storage account,
+  # which is required in azurerm 4.x for serial console access.
+  boot_diagnostics {}
 
   tags = { Name = var.hostname }
 }
