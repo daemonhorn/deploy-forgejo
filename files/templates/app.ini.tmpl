@@ -4,6 +4,10 @@ APP_NAME = Forgejo
 DOMAIN         = ${DOMAIN}
 ROOT_URL       = https://${DOMAIN}
 HTTP_PORT      = 3000
+; Internal hook calls (e.g. forgejo keys) connect back to Forgejo via this URL.
+; Must use 127.0.0.1 explicitly — 'localhost' resolves to ::1 (IPv6) which
+; Forgejo does not listen on, causing "connection refused" in authorized_keys lookup.
+LOCAL_ROOT_URL = http://127.0.0.1:3000/
 SSH_DOMAIN     = ${DOMAIN}
 SSH_PORT       = 2222
 ; SSH handled by host sshd (see sshd_forgejo.conf deployed by deploy.sh).

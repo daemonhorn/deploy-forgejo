@@ -15,6 +15,19 @@ error() { echo -e "${RED}[deploy]${NC} $*" >&2; exit 1; }
 WORKDIR="/opt/forgejo"
 cd "$WORKDIR"
 
+# ── 0. Configure host firewall (UFW) ─────────────────────────────────────────
+# Docker bypasses UFW for container-mapped ports (80, 443), but host services
+# like sshd-forgejo on port 2222 go through UFW. Allow required ports explicitly.
+# The Vultr cloud firewall is the perimeter control; UFW provides host-level defense.
+if command -v ufw &>/dev/null; then
+    info "Configuring UFW firewall rules..."
+    ufw allow 22/tcp   comment 'SSH admin'    >/dev/null
+    ufw allow 80/tcp   comment 'HTTP'         >/dev/null
+    ufw allow 443/tcp  comment 'HTTPS'        >/dev/null
+    ufw allow 2222/tcp comment 'Forgejo SSH'  >/dev/null
+    info "UFW rules updated."
+fi
+
 # ── 1. Install Docker Engine ──────────────────────────────────────────────────
 if ! command -v docker &>/dev/null; then
     info "Installing Docker..."

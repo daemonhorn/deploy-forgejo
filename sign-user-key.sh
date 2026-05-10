@@ -41,7 +41,10 @@ ykman info &>/dev/null || error "No Yubikey detected. Connect your Yubikey and t
 # ── Validity period ───────────────────────────────────────────────────────────
 VALIDITY="${CERT_VALIDITY:-+365d}"
 info "Signing public key for Forgejo user '$USERNAME' (validity: $VALIDITY)"
-info "Principal: $USERNAME"
+# Principal must be 'git' (the Unix login user for all Forgejo SSH connections).
+# The Forgejo user is identified by the registered base public key via
+# AuthorizedKeysCommand, not by the cert principal.
+info "Principal: git (Unix login user)"
 info "Key file:  $USER_PUBKEY"
 echo
 
@@ -60,7 +63,7 @@ ssh-keygen \
     -s ca.pub \
     -D "$PKCS11_LIB" \
     -I "${USERNAME}@forgejo" \
-    -n "$USERNAME" \
+    -n "git" \
     -V "$VALIDITY" \
     "$USER_PUBKEY"
 
