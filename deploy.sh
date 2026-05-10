@@ -13,6 +13,21 @@ info()  { echo -e "${GREEN}[deploy]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[deploy]${NC} $*"; }
 error() { echo -e "${RED}[deploy]${NC} $*" >&2; exit 1; }
 
+# Wait for any background apt/dpkg process (e.g. unattended-upgrades triggered by
+# Persistent=true timer on first boot) to release the lock before we run apt.
+wait_for_apt_lock() {
+    local waited=0
+    while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \
+              >/dev/null 2>&1; do
+        [ "$waited" -eq 0 ] && info "Waiting for apt/dpkg lock (held by another process)..."
+        waited=$((waited + 3))
+        [ "$waited" -lt 300 ] \
+            || error "apt/dpkg lock held for 5+ minutes — check: fuser /var/lib/dpkg/lock-frontend"
+        sleep 3
+    done
+    [ "$waited" -gt 0 ] && info "apt lock released after ${waited}s."
+}
+
 WORKDIR="/opt/forgejo"
 cd "$WORKDIR"
 
@@ -28,6 +43,7 @@ info "System packages up to date."
 if [ ! -f /etc/apt/apt.conf.d/50unattended-upgrades ] || \
    ! grep -q 'Forgejo-deploy' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null; then
     info "Configuring unattended-upgrades..."
+    wait_for_apt_lock
     apt-get install -y -qq unattended-upgrades
 
     DISTRO_CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
@@ -90,6 +106,7 @@ fi
 # ── 1. Install Docker Engine ──────────────────────────────────────────────────
 if ! command -v docker &>/dev/null; then
     info "Installing Docker..."
+    wait_for_apt_lock
     apt-get update -qq
     apt-get install -y -qq ca-certificates curl gnupg lsb-release
     install -m 0755 -d /etc/apt/keyrings
