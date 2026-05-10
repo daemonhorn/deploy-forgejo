@@ -18,13 +18,44 @@ error() { echo -e "${RED}[provision]${NC} $*" >&2; exit 1; }
 
 # ── CLI arguments ─────────────────────────────────────────────────────────────
 CERTBOT_STAGING=""
-for arg in "$@"; do
-    case "$arg" in
-        --debug) CERTBOT_STAGING=1
-                 warn "Debug mode: certbot will use staging CA and verbose logs." ;;
-        *)       error "Unknown argument: $arg. Usage: $0 [--debug]" ;;
+PROVIDER=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --debug)
+            CERTBOT_STAGING=1
+            warn "Debug mode: certbot will use staging CA and verbose logs."
+            shift ;;
+        --provider)
+            [[ $# -ge 2 ]] || error "--provider requires a value (vultr|aws)"
+            PROVIDER="$2"
+            shift 2 ;;
+        *)
+            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws] [--debug]" ;;
     esac
 done
+
+if [[ -n "$PROVIDER" && "$PROVIDER" != "vultr" && "$PROVIDER" != "aws" ]]; then
+    error "Invalid provider '$PROVIDER'. Use vultr or aws."
+fi
+
+# If not specified, default to last used provider (or prompt)
+if [[ -z "$PROVIDER" ]]; then
+    DEFAULT_PROVIDER="vultr"
+    if [[ -f .last-provider ]]; then
+        DEFAULT_PROVIDER="$(cat .last-provider | tr -d '[:space:]')"
+    elif grep -q 'provider_name' terraform/terraform.tfvars 2>/dev/null; then
+        _p="$(grep 'provider_name' terraform/terraform.tfvars | sed 's/.*=\s*"\(.*\)".*/\1/')"
+        [[ -n "$_p" ]] && DEFAULT_PROVIDER="$_p"
+    fi
+
+    read -rp "[provision] Cloud provider (vultr/aws) [${DEFAULT_PROVIDER}]: " _prov
+    PROVIDER="${_prov:-$DEFAULT_PROVIDER}"
+    [[ "$PROVIDER" == "vultr" || "$PROVIDER" == "aws" ]] \
+        || error "Invalid provider '$PROVIDER'. Use vultr or aws."
+fi
+
+info "Provider: $PROVIDER"
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 for cmd in vault terraform ssh scp ssh-keyscan envsubst; do
@@ -72,31 +103,57 @@ if [ -z "$FORGEJO_SECRET_KEY" ] || [ -z "$FORGEJO_INTERNAL_TOKEN" ]; then
         secret_key="$FORGEJO_SECRET_KEY" \
         internal_token="$FORGEJO_INTERNAL_TOKEN"
 fi
-export TF_VAR_vultr_api_key="$(vget vultr_api_key secret/forgejo/cloud)"
 
 CERTBOT_EMAIL="$(vget certbot_email secret/forgejo/deploy)"
 ADMIN_SSH_PUBLIC_KEY="$(vget admin_ssh_public_key secret/forgejo/deploy)"
 FORGEJO_ADMIN_USER="$(vget forgejo_admin_user secret/forgejo/deploy)"
 FORGEJO_ADMIN_EMAIL="$(vget forgejo_admin_email secret/forgejo/deploy)"
 
+# ── Provider credentials ──────────────────────────────────────────────────────
+export TF_VAR_admin_ssh_public_key="$ADMIN_SSH_PUBLIC_KEY"
+
+case "$PROVIDER" in
+    vultr)
+        export TF_VAR_vultr_api_key="$(vget vultr_api_key secret/forgejo/cloud)"
+        TF_DIR="$SCRIPT_DIR/terraform"
+        ;;
+    aws)
+        [ -f aws_access_key ]        || error "aws_access_key file not found in $SCRIPT_DIR"
+        [ -f aws_secret_access_key ] || error "aws_secret_access_key file not found in $SCRIPT_DIR"
+        export AWS_ACCESS_KEY_ID="$(tr -d '[:space:]' < aws_access_key)"
+        export AWS_SECRET_ACCESS_KEY="$(tr -d '[:space:]' < aws_secret_access_key)"
+        TF_DIR="$SCRIPT_DIR/terraform/aws"
+        ;;
+esac
+
 # ── SSH key for connecting to VPS ────────────────────────────────────────────
 SSH_KEY="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
 [ -f "$SSH_KEY" ] || error "SSH key not found: $SSH_KEY. Set SSH_KEY_PATH to override."
 
 # ── Terraform ─────────────────────────────────────────────────────────────────
-info "Running Terraform..."
-cd terraform/
+info "Running Terraform ($PROVIDER)..."
+cd "$TF_DIR"
+
+# Create tfvars for AWS if not yet present (Vultr's is written by setup.sh)
+if [[ "$PROVIDER" == "aws" && ! -f terraform.tfvars ]]; then
+    info "Creating terraform/aws/terraform.tfvars with defaults..."
+    cp terraform.tfvars.example terraform.tfvars
+fi
+
 terraform init -upgrade -input=false
 terraform apply -auto-approve -input=false
 IP="$(terraform output -raw public_ipv4)"
 SSH_USER="$(terraform output -raw ssh_user)"
 cd "$SCRIPT_DIR"
 
+# Persist provider selection so next run defaults to the same provider
+echo "$PROVIDER" > .last-provider
+
 # Domain is the VPS IP. LE issues IP certificates under the 'shortlived' profile
 # (160-hour validity); no DNS setup required.
 DOMAIN="$IP"
 
-info "VPS IP: $IP  SSH user: $SSH_USER"
+info "VPS IP: $IP  SSH user: $SSH_USER  Provider: $PROVIDER"
 
 # ── Wait for SSH ──────────────────────────────────────────────────────────────
 info "Waiting for SSH to become available (this takes ~60-90 seconds)..."
@@ -107,9 +164,20 @@ until ssh-keyscan -p 22 -T 5 "$IP" >> known_hosts.deploy 2>/dev/null; do
     [ "$ATTEMPTS" -lt 30 ] || error "Timed out waiting for SSH on $IP"
     sleep 10
 done
-info "SSH is up."
+info "SSH port is up."
 
 SSH_OPTS="-i $SSH_KEY -o UserKnownHostsFile=./known_hosts.deploy -o StrictHostKeyChecking=yes"
+
+# On AWS, user_data configures root access after sshd is already listening.
+# Retry the actual login until it succeeds (up to 3 extra minutes).
+info "Verifying SSH login as $SSH_USER..."
+ATTEMPTS=0
+until ssh $SSH_OPTS -o ConnectTimeout=10 -o BatchMode=yes "${SSH_USER}@${IP}" true 2>/dev/null; do
+    ATTEMPTS=$((ATTEMPTS + 1))
+    [ "$ATTEMPTS" -lt 18 ] || error "Cannot log in as ${SSH_USER}@${IP} after 3 minutes"
+    sleep 10
+done
+info "SSH login confirmed."
 
 # ── Render templates ──────────────────────────────────────────────────────────
 info "Rendering configuration templates..."
@@ -174,7 +242,7 @@ fi
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-info "Forgejo is live at https://${IP}"
+info "Forgejo is live at https://${IP}  [${PROVIDER}]"
 echo
 echo "  To add a user:"
 echo "    ./sign-user-key.sh <username> /path/to/user_key.pub"
