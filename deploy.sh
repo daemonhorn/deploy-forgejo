@@ -6,47 +6,39 @@
 #   ADMIN_SSH_PUBLIC_KEY
 #
 # Idempotent: each step checks before acting, safe to re-run.
-set -euo pipefail
+# -E propagates the ERR trap into functions and subshells.
+set -Eeuo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[deploy]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[deploy]${NC} $*"; }
 error() { echo -e "${RED}[deploy]${NC} $*" >&2; exit 1; }
 
+# Print line number and exit code on any unexpected command failure so the cause
+# is always visible even when the failing command produces no output of its own.
+trap 'ret=$?; echo -e "${RED}[deploy] FAILED${NC} at line ${LINENO} — command exited ${ret}" >&2' ERR
+
 # Suppress debconf interactive prompts for every apt-get call in this script.
 # NEEDRESTART_MODE=a tells needrestart (Debian 12 default) to auto-restart
-# services without prompting — without this, apt-get install hangs waiting
-# for user input even with -y.
+# services without asking — without this, apt-get install hangs on a prompt
+# even with -y.
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
-# Wait for any background apt/dpkg process to release the lock before running apt.
-# Shows the holding PID and command for diagnostics, times out after 5 minutes.
-wait_for_apt_lock() {
-    local waited=0
-    while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \
-              >/dev/null 2>&1; do
-        if [ "$waited" -eq 0 ]; then
-            local holder
-            holder="$(fuser /var/lib/dpkg/lock-frontend 2>/dev/null || true)"
-            info "Waiting for apt/dpkg lock (held by PID ${holder:-?}: $(ps -p "${holder:-1}" -o comm= 2>/dev/null || true))..."
-        fi
-        waited=$((waited + 3))
-        [ "$waited" -lt 300 ] \
-            || error "apt/dpkg lock held for 5+ minutes — run: fuser /var/lib/dpkg/lock-frontend"
-        sleep 3
-    done
-    [ "$waited" -gt 0 ] && info "apt lock released after ${waited}s."
-}
+# APT lock timeout: apt waits up to 3 minutes for another apt/dpkg process to
+# finish before giving up with a clear error message. This handles cloud-init
+# running apt on first boot without needing fuser or any external tool.
+# (DPkg::Lock::Timeout available since apt 1.9.1 / Debian 11+)
+APT_OPTS="-o DPkg::Lock::Timeout=180"
 
 WORKDIR="/opt/forgejo"
 cd "$WORKDIR"
 
 # ── 0a. Update all system packages ───────────────────────────────────────────
 info "Updating system packages (this may take a minute on first run)..."
-wait_for_apt_lock
-apt-get update -qq
-apt-get upgrade -y \
+# No -q/-qq: Debian 12 apt silences even errors at -qq level.
+apt-get $APT_OPTS update
+apt-get $APT_OPTS upgrade -y \
     -o Dpkg::Options::="--force-confdef" \
     -o Dpkg::Options::="--force-confold"
 info "System packages up to date."
@@ -55,8 +47,7 @@ info "System packages up to date."
 if [ ! -f /etc/apt/apt.conf.d/50unattended-upgrades ] || \
    ! grep -q 'Forgejo-deploy' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null; then
     info "Configuring unattended-upgrades..."
-    wait_for_apt_lock
-    apt-get install -y unattended-upgrades
+    apt-get $APT_OPTS install -y unattended-upgrades
 
     DISTRO_CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
 
@@ -118,9 +109,8 @@ fi
 # ── 1. Install Docker Engine ──────────────────────────────────────────────────
 if ! command -v docker &>/dev/null; then
     info "Installing Docker..."
-    wait_for_apt_lock
-    apt-get update -qq
-    apt-get install -y ca-certificates curl gnupg lsb-release
+    apt-get $APT_OPTS update
+    apt-get $APT_OPTS install -y ca-certificates curl gnupg lsb-release
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/debian/gpg \
         | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -128,8 +118,8 @@ if ! command -v docker &>/dev/null; then
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
 https://download.docker.com/linux/debian $(lsb_release -cs) stable" \
         > /etc/apt/sources.list.d/docker.list
-    apt-get update -qq
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin python3
+    apt-get $APT_OPTS update
+    apt-get $APT_OPTS install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin python3
     systemctl enable --now docker
     info "Docker installed."
 else
