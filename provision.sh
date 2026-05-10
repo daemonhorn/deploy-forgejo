@@ -215,47 +215,143 @@ PY
     fi
 }
 
-fetch_azure_plans() {
-    local file="$CACHE_DIR/azure-plans.json"
+# Fetch AWS EC2 instance availability for a specific region (uses AWS CLI credentials).
+# Pricing is approximate/static — the AWS pricing API requires complex auth; availability is the key value here.
+fetch_aws_plans() {
+    local region="$1"
+    local file="$CACHE_DIR/aws-plans-${region}.json"
     mkdir -p "$CACHE_DIR"
-    if python3 - "$file" <<'PY'
-import json, sys, time, urllib.request, urllib.parse
-SKUS = ['Standard_B1ls', 'Standard_B1s', 'Standard_B1ms', 'Standard_B2s', 'Standard_B2ms']
-NOTES = {
-    'Standard_B1ls': '1C/512MB  (not recommended: OOM risk with Forgejo+Postgres)',
-    'Standard_B1s':  '1C/1GB    (recommended minimum)',
-    'Standard_B1ms': '1C/2GB',
-    'Standard_B2s':  '2C/4GB',
-    'Standard_B2ms': '2C/8GB',
+    if python3 - "$file" "$region" <<'PY'
+import json, sys, time, subprocess
+TARGET = ['t4g.micro', 't3a.micro', 't3.micro', 't3.small', 't3.medium']
+STATIC = {
+    't4g.micro':  ('2C ARM/1GB',   '~$6/mo',   '(cheapest; Graviton ARM architecture)'),
+    't3a.micro':  ('2C AMD/1GB',   '~$7/mo',   ''),
+    't3.micro':   ('2C Intel/1GB', '~$8/mo',   '(free-tier eligible)'),
+    't3.small':   ('2C Intel/2GB', '~$15/mo',  ''),
+    't3.medium':  ('2C Intel/4GB', '~$30/mo',  ''),
 }
+file, region = sys.argv[1], sys.argv[2]
 try:
-    parts = [f"armSkuName eq '{s}'" for s in SKUS]
-    filt  = "(" + " or ".join(parts) + ") and armRegionName eq 'eastus' and priceType eq 'Consumption'"
-    url   = "https://prices.azure.com/api/retail/prices?$filter=" + urllib.parse.quote(filt)
-    with urllib.request.urlopen(url, timeout=15) as r:
-        data = json.load(r)
-    prices = {}
-    for item in data.get('Items', []):
-        sku = item.get('armSkuName', '')
-        name = item.get('skuName', '')
-        if sku in SKUS and 'Spot' not in name and 'Low Priority' not in name:
-            cost = item.get('retailPrice', 0)
-            if sku not in prices or cost < prices[sku]:
-                prices[sku] = cost
+    out = subprocess.run(
+        ['aws', 'ec2', 'describe-instance-type-offerings',
+         '--location-type', 'region',
+         '--filters', f'Name=instance-type,Values={",".join(TARGET)}',
+         '--region', region, '--output', 'json'],
+        capture_output=True, text=True, timeout=30
+    )
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip())
+    available = {o['InstanceType'] for o in json.loads(out.stdout).get('InstanceTypeOfferings', [])}
     items = []
-    for sku in SKUS:
-        cost = prices.get(sku, 0)
-        note = NOTES.get(sku, '')
-        desc = f"{note}  ~${cost * 730:.0f}/mo" if cost > 0 else note
-        items.append({'code': sku, 'desc': desc})
-    json.dump({'ts': int(time.time()), 'items': items}, open(sys.argv[1], 'w'))
+    for t in TARGET:
+        if t not in available:
+            continue
+        spec, cost, note = STATIC[t]
+        desc = f"{spec}  {cost}"
+        if note:
+            desc += f"  {note}"
+        items.append({'code': t, 'desc': desc})
+    json.dump({'ts': int(time.time()), 'items': items, 'region': region}, open(file, 'w'))
     sys.exit(0)
 except Exception as e:
-    print(f"[provision] warning: failed to fetch Azure plans: {e}", file=sys.stderr)
+    print(f"[provision] warning: failed to fetch AWS plans for {region}: {e}", file=sys.stderr)
     sys.exit(1)
 PY
     then
-        info "Fetched Azure VM plans from pricing API."
+        info "Fetched AWS instance availability for ${region}."
+    else
+        return 1
+    fi
+}
+
+# Fetch Azure B-series VM availability and region-specific pricing (uses ARM service principal).
+fetch_azure_plans() {
+    local region="$1"
+    local file="$CACHE_DIR/azure-plans-${region}.json"
+    mkdir -p "$CACHE_DIR"
+    if python3 - "$file" "$region" <<'PY'
+import json, sys, time, urllib.request, urllib.parse, os
+TARGET = ['Standard_B1ls', 'Standard_B1s', 'Standard_B1ms', 'Standard_B2s', 'Standard_B2ms']
+SPECS  = {'Standard_B1ls': '1C/512MB', 'Standard_B1s': '1C/1GB', 'Standard_B1ms': '1C/2GB',
+          'Standard_B2s': '2C/4GB', 'Standard_B2ms': '2C/8GB'}
+NOTES  = {'Standard_B1ls': '(not recommended: OOM risk with Forgejo+Postgres)',
+          'Standard_B1s':  '(recommended minimum)'}
+file, region = sys.argv[1], sys.argv[2]
+client_id       = os.environ['ARM_CLIENT_ID']
+client_secret   = os.environ['ARM_CLIENT_SECRET']
+tenant_id       = os.environ['ARM_TENANT_ID']
+subscription_id = os.environ['ARM_SUBSCRIPTION_ID']
+try:
+    # 1. OAuth2 client_credentials token
+    token_body = urllib.parse.urlencode({
+        'grant_type': 'client_credentials', 'client_id': client_id,
+        'client_secret': client_secret, 'resource': 'https://management.azure.com/',
+    }).encode()
+    with urllib.request.urlopen(
+        f"https://login.microsoftonline.com/{tenant_id}/oauth2/token",
+        token_body, timeout=15
+    ) as r:
+        token = json.load(r)['access_token']
+
+    # 2. Paginate Compute SKU list for region; check for Location-type restrictions
+    hdrs = {'Authorization': f'Bearer {token}'}
+    url  = (f"https://management.azure.com/subscriptions/{subscription_id}"
+            f"/providers/Microsoft.Compute/skus?api-version=2021-07-01"
+            f"&$filter=location+eq+%27{urllib.parse.quote(region)}%27")
+    available = set()
+    while url:
+        req = urllib.request.Request(url, headers=hdrs)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.load(r)
+        for sku in data.get('value', []):
+            if sku.get('resourceType') != 'virtualMachines':
+                continue
+            name = sku.get('name', '')
+            if name not in TARGET:
+                continue
+            restricted = any(r2.get('type') == 'Location' for r2 in sku.get('restrictions', []))
+            if not restricted:
+                available.add(name)
+        url = data.get('nextLink')
+
+    # 3. Region-specific pricing from public Azure Retail Prices API
+    prices = {}
+    if available:
+        parts     = [f"armSkuName eq '{s}'" for s in available]
+        filt      = "(" + " or ".join(parts) + f") and armRegionName eq '{region}' and priceType eq 'Consumption'"
+        price_url = "https://prices.azure.com/api/retail/prices?$filter=" + urllib.parse.quote(filt)
+        with urllib.request.urlopen(price_url, timeout=15) as r:
+            pdata = json.load(r)
+        for item in pdata.get('Items', []):
+            sku  = item.get('armSkuName', '')
+            name = item.get('skuName', '')
+            if sku in available and 'Spot' not in name and 'Low Priority' not in name:
+                cost = item.get('retailPrice', 0)
+                if sku not in prices or cost < prices[sku]:
+                    prices[sku] = cost
+
+    items = []
+    for t in TARGET:
+        if t not in available:
+            continue
+        desc = SPECS.get(t, t)
+        cost = prices.get(t, 0)
+        if cost > 0:
+            desc += f"  ~${cost * 730:.0f}/mo"
+        note = NOTES.get(t, '')
+        if note:
+            desc += f"  {note}"
+        items.append({'code': t, 'desc': desc})
+
+    json.dump({'ts': int(time.time()), 'items': items, 'region': region}, open(file, 'w'))
+    sys.exit(0)
+except Exception as e:
+    print(f"[provision] warning: failed to fetch Azure plans for {region}: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+    then
+        info "Fetched Azure VM availability and pricing for ${region}."
     else
         return 1
     fi
@@ -476,7 +572,6 @@ case "$PROVIDER" in
         [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN="t3.micro"
 
         REG_CACHE="$CACHE_DIR/aws-regions.json"
-
         if $FORCE_REFRESH || ! cache_fresh "$REG_CACHE"; then fetch_aws_regions || true; fi
 
         REGIONS=()
@@ -499,19 +594,32 @@ case "$PROVIDER" in
             )
         fi
 
-        # AWS instance types: no public pricing API without auth; use static list
-        PLANS=(
-            "t4g.micro:2C ARM/1GB    ~\$6/mo   (cheapest; Graviton ARM architecture)"
-            "t3a.micro:2C AMD/1GB    ~\$7/mo"
-            "t3.micro:2C Intel/1GB   ~\$8/mo   (free-tier eligible)"
-            "t3.small:2C Intel/2GB   ~\$15/mo"
-            "t3.medium:2C Intel/4GB  ~\$30/mo"
-        )
-
-        show_menu "AWS regions ($(cache_age_str "$REG_CACHE"); pricing varies; see aws.amazon.com/ec2/pricing/):" \
+        show_menu "AWS regions ($(cache_age_str "$REG_CACHE"); see aws.amazon.com/ec2/pricing/):" \
             "$CURRENT_REGION" "${REGIONS[@]}"
         REGION="$_MENU_RESULT"
-        show_menu "AWS EC2 instance types (static approx; Linux on-demand, us-east-1; verify at aws.amazon.com/ec2/pricing/):" \
+
+        # Fetch instance availability for the selected region (keyed per-region)
+        PLAN_CACHE="$CACHE_DIR/aws-plans-${REGION}.json"
+        if $FORCE_REFRESH || ! cache_fresh "$PLAN_CACHE"; then fetch_aws_plans "$REGION" || true; fi
+
+        PLANS=()
+        [[ -f "$PLAN_CACHE" ]] && load_cache_items PLANS "$PLAN_CACHE"
+        if [[ ${#PLANS[@]} -eq 0 ]]; then
+            warn "Could not verify instance availability in ${REGION}; showing all types (some may be unavailable)."
+            PLANS=(
+                "t4g.micro:2C ARM/1GB    ~\$6/mo   (cheapest; Graviton ARM architecture)"
+                "t3a.micro:2C AMD/1GB    ~\$7/mo"
+                "t3.micro:2C Intel/1GB   ~\$8/mo   (free-tier eligible)"
+                "t3.small:2C Intel/2GB   ~\$15/mo"
+                "t3.medium:2C Intel/4GB  ~\$30/mo"
+            )
+        fi
+        # Reset default if prior plan is not available in the new region
+        _plan_ok=false
+        for _p in "${PLANS[@]}"; do [[ "${_p%%:*}" == "$CURRENT_PLAN" ]] && { _plan_ok=true; break; }; done
+        $_plan_ok || CURRENT_PLAN="${PLANS[0]%%:*}"
+
+        show_menu "AWS EC2 instance types available in ${REGION} ($(cache_age_str "$PLAN_CACHE"); pricing approx):" \
             "$CURRENT_PLAN" "${PLANS[@]}"
         PLAN="$_MENU_RESULT"
         ;;
@@ -519,11 +627,7 @@ case "$PROVIDER" in
         [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="eastus"
         [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN="Standard_B1s"
 
-        PLAN_CACHE="$CACHE_DIR/azure-plans.json"
-
-        if $FORCE_REFRESH || ! cache_fresh "$PLAN_CACHE"; then fetch_azure_plans || true; fi
-
-        # Azure regions: no free unauthenticated API; use static list
+        # Azure regions: no free unauthenticated list API; use static list
         REGIONS=(
             "eastus:East US - Virginia"
             "eastus2:East US 2 - Virginia"
@@ -543,9 +647,18 @@ case "$PROVIDER" in
             "brazilsouth:Brazil South - Sao Paulo"
         )
 
+        show_menu "Azure regions (static; see azure.microsoft.com/pricing/details/virtual-machines/linux/):" \
+            "$CURRENT_REGION" "${REGIONS[@]}"
+        REGION="$_MENU_RESULT"
+
+        # Fetch available VM sizes and region-specific pricing (authenticated, keyed per-region)
+        PLAN_CACHE="$CACHE_DIR/azure-plans-${REGION}.json"
+        if $FORCE_REFRESH || ! cache_fresh "$PLAN_CACHE"; then fetch_azure_plans "$REGION" || true; fi
+
         PLANS=()
         [[ -f "$PLAN_CACHE" ]] && load_cache_items PLANS "$PLAN_CACHE"
         if [[ ${#PLANS[@]} -eq 0 ]]; then
+            warn "Could not verify VM availability in ${REGION}; showing all sizes (some may be unavailable)."
             PLANS=(
                 "Standard_B1ls:1C/512MB   ~\$4/mo   (not recommended: OOM risk with Forgejo+Postgres)"
                 "Standard_B1s:1C/1GB      ~\$8/mo   (recommended minimum)"
@@ -554,11 +667,12 @@ case "$PROVIDER" in
                 "Standard_B2ms:2C/8GB     ~\$61/mo"
             )
         fi
+        # Reset default if prior plan is not available in the new region
+        _plan_ok=false
+        for _p in "${PLANS[@]}"; do [[ "${_p%%:*}" == "$CURRENT_PLAN" ]] && { _plan_ok=true; break; }; done
+        $_plan_ok || CURRENT_PLAN="${PLANS[0]%%:*}"
 
-        show_menu "Azure regions (static; see azure.microsoft.com/pricing/details/virtual-machines/linux/):" \
-            "$CURRENT_REGION" "${REGIONS[@]}"
-        REGION="$_MENU_RESULT"
-        show_menu "Azure VM sizes - B-series burstable ($(cache_age_str "$PLAN_CACHE"); verify at azure.microsoft.com/pricing/details/virtual-machines/linux/):" \
+        show_menu "Azure VM sizes available in ${REGION} - B-series burstable ($(cache_age_str "$PLAN_CACHE")):" \
             "$CURRENT_PLAN" "${PLANS[@]}"
         PLAN="$_MENU_RESULT"
         ;;
