@@ -185,6 +185,54 @@ files/
     nginx-http.conf.tmpl        # nginx HTTP-only config (used during cert issuance)
 ```
 
+## SSH key and certificate primer
+
+Understanding the three files involved in SSH certificate authentication:
+
+### The files
+
+| File | Who holds it | Purpose |
+|---|---|---|
+| `id_ed25519` | User only — never shared | Private key; proves key ownership during auth |
+| `id_ed25519.pub` | Freely shareable | Public key; given to admin to sign |
+| `id_ed25519-cert.pub` | User (returned by admin) | Certificate; the CA's signed attestation of the public key |
+
+### Does the user need to provide their private key?
+
+**No.** Only `id_ed25519.pub` is needed to create a certificate. The Yubikey CA signs the public key and attaches metadata (identity string, principals, validity window). The private key is never involved in cert creation and never leaves the user's machine.
+
+### How a cert is created
+
+```
+User's id_ed25519.pub  ──→  admin runs sign-user-key.sh  ──→  Yubikey signs it
+                                                                      │
+                                                          id_ed25519-cert.pub
+                                                          (returned to user)
+```
+
+The certificate is a bundle containing:
+- The original public key
+- Metadata: CA identity, principals (`git`), validity period, key ID
+- The CA's cryptographic signature over all of the above
+
+### How SSH authentication works with a cert
+
+When the user connects, OpenSSH automatically uses both files together:
+
+1. **Client presents** `id_ed25519-cert.pub` to the server
+2. **Server checks** the cert is signed by a trusted CA (`TrustedUserCAKeys`) and is not expired
+3. **Server challenges** the client to prove it holds the private key matching the cert's public key
+4. **Client signs** the challenge with `id_ed25519` (private key) and sends the signature
+5. **Server verifies** the signature — auth succeeds
+
+The private key is used only in step 4, locally on the client. It is never transmitted.
+
+### Auto-generated keypairs (batch mode)
+
+When `sign-user-key.sh --batch` auto-generates a keypair (no key column in the CSV), the admin holds both the private key and the cert. The private key must be transmitted to the user via a secure out-of-band channel (encrypted email, password manager share, etc.) before they can authenticate.
+
+Users who supply their own public key never expose their private key — only the cert needs to be returned to them.
+
 ## Adding a cloud provider
 
 Create `terraform/modules/providers/<name>/` with the same interface as `vultr/`:
