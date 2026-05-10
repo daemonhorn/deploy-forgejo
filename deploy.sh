@@ -55,6 +55,10 @@ if ! id git &>/dev/null; then
 fi
 # git user needs to run 'docker exec forgejo' via sudo
 usermod -aG docker git 2>/dev/null || true
+# Unlock the git account: useradd -r sets password to '!' which OpenSSH
+# rejects via allowed_user() even when UsePAM no. '*' means no password
+# but account is not locked, so key/cert auth proceeds normally.
+usermod -p '*' git
 
 # ── 3. Create directory structure ─────────────────────────────────────────────
 info "Creating directories..."
@@ -77,9 +81,14 @@ chmod 755 /usr/local/lib/forgejo-cert-extract.py
 info "Installing host Forgejo command wrapper..."
 cat > /usr/local/bin/forgejo << 'EOF'
 #!/bin/bash
-exec /usr/bin/docker exec -i -u git forgejo /usr/local/bin/forgejo "$@"
+# -e SSH_ORIGINAL_COMMAND passes the git command (upload-pack/receive-pack) into
+# the container so 'forgejo serv' knows which operation to perform.
+exec /usr/bin/docker exec -i -e SSH_ORIGINAL_COMMAND -u git forgejo /usr/local/bin/forgejo "$@"
 EOF
 chmod 755 /usr/local/bin/forgejo
+# forgejo keys outputs command="/usr/local/bin/gitea serv key-N" (legacy Gitea path).
+# The host needs this path too so sshd can invoke it for Git-over-SSH sessions.
+ln -sf /usr/local/bin/forgejo /usr/local/bin/gitea
 
 info "Setting file permissions..."
 chmod 600 "$WORKDIR/.env" "$WORKDIR/app.ini"
@@ -93,7 +102,7 @@ chown 1000:1000 "$WORKDIR/app.ini" "$WORKDIR/ca.pub"
 info "Configuring sudoers for forgejo-keys..."
 cat > /etc/sudoers.d/forgejo-keys << 'EOF'
 # Allow sshd AuthorizedKeysCommand (runs as nobody) to query Forgejo for keys.
-nobody ALL=(root) NOPASSWD: /usr/bin/docker exec forgejo forgejo keys *
+nobody ALL=(root) NOPASSWD: /usr/bin/docker exec -u git forgejo forgejo keys *
 EOF
 chmod 440 /etc/sudoers.d/forgejo-keys
 

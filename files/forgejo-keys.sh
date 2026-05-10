@@ -14,7 +14,7 @@ KEY_TYPE="$2"
 KEY_B64="$3"
 
 FORGEJO_KEYS_QUERY() {
-    sudo docker exec forgejo forgejo keys -e git -u "$1" -t "$2" -k "$3" 2>/dev/null
+    sudo docker exec -u git forgejo forgejo keys -e git -u "$1" -t "$2" -k "$3" 2>/dev/null
 }
 
 if [[ "$KEY_TYPE" == *"-cert-v01@openssh.com" ]]; then
