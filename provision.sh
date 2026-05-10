@@ -497,12 +497,21 @@ def require(key, *aliases):
     for k in (key,) + aliases:
         if k in d and d[k]:
             return d[k]
+    if key == "subscriptionId":
+        import subprocess
+        try:
+            r = subprocess.run(['az', 'account', 'show', '--query', 'id', '-o', 'tsv'],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except Exception:
+            pass
+        checked = ', '.join((key,) + aliases)
+        sys.exit(f"azure_credentials: missing '{key}' and 'az account show' failed.\n"
+                 f"  Add it manually: {{\"subscriptionId\": \"<id>\", ...}}\n"
+                 f"  Find your subscription ID with: az account show --query id -o tsv")
     checked = ', '.join((key,) + aliases)
-    hint = ("\n  Tip: 'az ad sp create-for-rbac' output does not include subscriptionId."
-            "\n  Add it manually: {\"subscriptionId\": \"<id>\", ...}"
-            "\n  Find your subscription ID with: az account show --query id -o tsv") \
-           if key == "subscriptionId" else ""
-    sys.exit(f"azure_credentials: missing required field '{key}' (checked: {checked}){hint}")
+    sys.exit(f"azure_credentials: missing required field '{key}' (checked: {checked})")
 pairs = [
     ("ARM_CLIENT_ID",       require("clientId",       "appId")),
     ("ARM_CLIENT_SECRET",   require("clientSecret",   "password")),
