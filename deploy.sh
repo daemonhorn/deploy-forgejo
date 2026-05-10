@@ -3,7 +3,7 @@
 #
 # Invoked by provision.sh via SSH. Required env vars (injected by provision.sh):
 #   DOMAIN, CERTBOT_EMAIL, FORGEJO_ADMIN_USER, FORGEJO_ADMIN_EMAIL,
-#   ADMIN_SSH_PUBLIC_KEY
+#   FORGEJO_ADMIN_PASSWORD, ADMIN_SSH_PUBLIC_KEY
 #
 # Idempotent: each step checks before acting, safe to re-run.
 # -E propagates the ERR trap into functions and subshells.
@@ -421,31 +421,34 @@ until curl -sf --max-time 5 "http://localhost:3000" -o /dev/null; do
 done
 info "Forgejo is responding."
 
-# ── 11. Create Forgejo admin user ─────────────────────────────────────────────
+# ── 11. Create Forgejo admin user and set Vault-managed password ──────────────
 FORGEJO_CONTAINER="$(docker compose -f "$WORKDIR/docker-compose.yml" --project-directory "$WORKDIR" ps -q forgejo)"
 
 if ! docker exec "$FORGEJO_CONTAINER" \
         forgejo admin user list 2>/dev/null | grep -q "^1 "; then
     info "Creating Forgejo admin user '$FORGEJO_ADMIN_USER'..."
-    CREATE_OUT="$(docker exec -u git "$FORGEJO_CONTAINER" \
+    docker exec -u git "$FORGEJO_CONTAINER" \
         /usr/local/bin/forgejo admin user create \
             --username "$FORGEJO_ADMIN_USER" \
             --email "$FORGEJO_ADMIN_EMAIL" \
             --admin \
-            --random-password \
-            2>&1 || true)"
-    # Forgejo prints: generated random password is '<password>'
-    ADMIN_PASS="$(echo "$CREATE_OUT" | grep -oP "generated random password is '\K[^']+"  || true)"
-    if [ -n "$ADMIN_PASS" ]; then
-        warn "Admin one-time password: $ADMIN_PASS  (change this immediately after login)"
-        warn "To reset: docker exec -u git forgejo /usr/local/bin/forgejo admin user change-password --username $FORGEJO_ADMIN_USER --password <newpass>"
-    else
-        warn "Admin user create output: $CREATE_OUT"
-        warn "To set password: docker exec -u git forgejo /usr/local/bin/forgejo admin user change-password --username $FORGEJO_ADMIN_USER --password <newpass>"
-    fi
+            --password "$FORGEJO_ADMIN_PASSWORD" \
+            --must-change-password=false \
+        2>&1 || warn "User create returned non-zero — may already exist"
 else
-    info "Admin user already exists, skipping."
+    info "Admin user already exists."
 fi
+
+# Always sync the password to the Vault-stored value so Vault stays authoritative
+# even if the password was changed in the UI between deploys.
+info "Syncing admin password from Vault..."
+docker exec -u git "$FORGEJO_CONTAINER" \
+    /usr/local/bin/forgejo admin user change-password \
+        --username "$FORGEJO_ADMIN_USER" \
+        --password "$FORGEJO_ADMIN_PASSWORD" \
+    2>&1 | grep -v '^$' || true
+info "Admin password set. Retrieve from Vault on your local machine:"
+info "  vault kv get -field=admin_password secret/forgejo/deploy"
 
 # ── 12. Start Forgejo sshd ────────────────────────────────────────────────────
 info "Starting Forgejo SSH daemon on port 2222..."

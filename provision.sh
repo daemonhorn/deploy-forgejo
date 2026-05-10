@@ -109,6 +109,17 @@ ADMIN_SSH_PUBLIC_KEY="$(vget admin_ssh_public_key secret/forgejo/deploy)"
 FORGEJO_ADMIN_USER="$(vget forgejo_admin_user secret/forgejo/deploy)"
 FORGEJO_ADMIN_EMAIL="$(vget forgejo_admin_email secret/forgejo/deploy)"
 
+# Generate a secure admin password once and persist it; reused on re-runs so
+# Vault is always the authoritative source for the current admin credential.
+FORGEJO_ADMIN_PASSWORD="$(vget admin_password secret/forgejo/deploy 2>/dev/null || true)"
+if [ -z "$FORGEJO_ADMIN_PASSWORD" ]; then
+    info "Generating Forgejo admin password (20-24 chars)..."
+    # 18 random bytes → 24 base64 chars; strip +/= → 20-24 alphanumeric chars
+    FORGEJO_ADMIN_PASSWORD="$(openssl rand -base64 18 | tr -d '+/=')"
+    vault kv patch secret/forgejo/deploy admin_password="$FORGEJO_ADMIN_PASSWORD"
+    info "Admin password saved to Vault: secret/forgejo/deploy (field: admin_password)"
+fi
+
 # ── Provider credentials ──────────────────────────────────────────────────────
 export TF_VAR_admin_ssh_public_key="$ADMIN_SSH_PUBLIC_KEY"
 
@@ -262,6 +273,7 @@ ssh $SSH_OPTS "${SSH_USER}@${IP}" \
      CERTBOT_STAGING='${CERTBOT_STAGING}' \
      FORGEJO_ADMIN_USER='${FORGEJO_ADMIN_USER}' \
      FORGEJO_ADMIN_EMAIL='${FORGEJO_ADMIN_EMAIL}' \
+     FORGEJO_ADMIN_PASSWORD='${FORGEJO_ADMIN_PASSWORD}' \
      ADMIN_SSH_PUBLIC_KEY='${ADMIN_SSH_PUBLIC_KEY}' \
      bash /opt/forgejo/deploy.sh"
 
@@ -284,6 +296,10 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 info "Forgejo is live at https://${IP}  [${PROVIDER}]"
 echo
 echo "  Admin SSH : ssh deploy@${IP}   (root login disabled after hardening)"
+echo
+echo "  Forgejo admin credentials:"
+echo "    Username : ${FORGEJO_ADMIN_USER}"
+echo "    Password : vault kv get -field=admin_password secret/forgejo/deploy"
 echo
 echo "  To add a user:"
 echo "    ./sign-user-key.sh <username> /path/to/user_key.pub"
