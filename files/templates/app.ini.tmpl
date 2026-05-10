@@ -1,5 +1,21 @@
 APP_NAME = Forgejo
 
+; ── Repository ────────────────────────────────────────────────────────────────
+[repository]
+; Push to a non-existent repo to create it automatically (user-owned).
+ENABLE_PUSH_CREATE_USER = true
+; Same for organisation-owned repos.
+;ENABLE_PUSH_CREATE_ORG  = false
+; Default branch name for new repos.
+;DEFAULT_BRANCH          = main
+; Privacy of newly created repos: last (repeat last choice) | private | public
+;DEFAULT_PRIVATE         = last
+; Maximum repos a user may create; -1 = unlimited.
+;MAX_CREATION_LIMIT      = -1
+; Force users to sign in before they can view any page.
+;FORCE_PRIVATE           = false
+
+; ── Server ────────────────────────────────────────────────────────────────────
 [server]
 DOMAIN         = ${DOMAIN}
 ROOT_URL       = https://${DOMAIN}
@@ -14,7 +30,12 @@ SSH_PORT       = 2222
 ; Forgejo's built-in SSH server is disabled.
 START_SSH_SERVER                  = false
 SSH_TRUSTED_USER_CA_KEYS_FILENAME = /data/gitea/ssh/trusted-user-ca-keys.pub
+; Where uploaded files (avatars, LFS objects, etc.) are stored inside the container.
+;APP_DATA_PATH    = /data/gitea
+; Disable landing page for unauthenticated users (explore | user | login).
+;LANDING_PAGE     = explore
 
+; ── Database ──────────────────────────────────────────────────────────────────
 [database]
 DB_TYPE = postgres
 HOST    = db:5432
@@ -22,17 +43,112 @@ NAME    = ${DB_NAME}
 USER    = ${DB_USER}
 PASSWD  = ${DB_PASSWORD}
 
+; ── Service ───────────────────────────────────────────────────────────────────
 [service]
+; Password auth disabled — users must authenticate via SSH certificate.
 ENABLE_BASIC_AUTHENTICATION = false
+; Self-registration disabled — admin must create accounts via sign-user-key.sh.
 DISABLE_REGISTRATION        = true
+; Require sign-in to view any page (useful for fully private instances).
+;REQUIRE_SIGNIN_VIEW                = false
+; Keep user email addresses private by default.
+;DEFAULT_KEEP_EMAIL_PRIVATE         = false
+; Allow users to create organisations.
+;DEFAULT_ALLOW_CREATE_ORGANIZATION  = true
+; Set newly created users as restricted (read-only until explicitly granted access).
+;DEFAULT_USER_IS_RESTRICTED         = false
+; Show follow/star/fork counts on the explore page.
+;SHOW_REGISTRATION_BUTTON           = false
+; Send a confirmation email on user creation (requires [mailer] to be configured).
+;REGISTER_EMAIL_CONFIRM             = false
 
+; ── Security ──────────────────────────────────────────────────────────────────
 [security]
 ; Prevents web-installer from running on first request before admin account exists.
 INSTALL_LOCK   = true
 ; Pre-generated so Forgejo does not regenerate them on every restart.
 SECRET_KEY     = ${FORGEJO_SECRET_KEY}
 INTERNAL_TOKEN = ${FORGEJO_INTERNAL_TOKEN}
+; Minimum password complexity (off | low | medium | high).
+;PASSWORD_COMPLEXITY  = low
+; Number of days before a password expires (0 = never).
+;PASSWORD_CHANGE_TEMP = 0
 
+; ── Mailer (disabled by default) ──────────────────────────────────────────────
+; Uncomment and fill in to enable email notifications and password resets.
+[mailer]
+ENABLED  = false
+;FROM     = forgejo@example.com
+;PROTOCOL = smtp+starttls        ; smtp | smtp+starttls | smtp+tls | sendmail
+;SMTP_ADDR = mail.example.com
+;SMTP_PORT = 587
+;USER      = forgejo@example.com
+;PASSWD    = <app-password>
+
+; ── Session ───────────────────────────────────────────────────────────────────
+[session]
+; Session data stored on disk inside the container; no external Redis needed.
+PROVIDER        = file
+;COOKIE_SECURE   = true          ; set true when ROOT_URL is https (recommended)
+;COOKIE_NAME     = forgejo_session
+;SESSION_LIFE_TIME = 86400       ; seconds; 86400 = 24 h
+
+; ── Cache ─────────────────────────────────────────────────────────────────────
+[cache]
+; In-process memory cache; replace with redis for multi-replica deployments.
+ADAPTER  = memory
+;INTERVAL = 60                   ; GC interval in seconds
+
+; ── UI ────────────────────────────────────────────────────────────────────────
+[ui]
+;DEFAULT_THEME      = forgejo-auto   ; forgejo-auto | forgejo-light | forgejo-dark
+;EXPLORE_PAGING_NUM = 20
+;ISSUE_PAGING_NUM   = 20
+
+; ── Git ───────────────────────────────────────────────────────────────────────
+[git]
+;MAX_GIT_DIFF_LINES  = 1000
+;MAX_GIT_DIFF_FILES  = 100
+;GC_ARGS             =          ; extra args passed to 'git gc'
+
+; ── LFS ───────────────────────────────────────────────────────────────────────
+[lfs]
+; Git Large File Storage — stores blobs in APP_DATA_PATH/lfs.
+;ENABLED      = true
+
+; ── Attachments ───────────────────────────────────────────────────────────────
+[attachment]
+;ENABLED      = true
+;MAX_SIZE     = 4               ; MiB per file
+;MAX_FILES    = 5               ; files per upload
+
+; ── API ───────────────────────────────────────────────────────────────────────
+[api]
+;ENABLE_SWAGGER    = true
+;MAX_RESPONSE_ITEMS = 50
+
+; ── OAuth2 ────────────────────────────────────────────────────────────────────
+[oauth2]
+;ENABLED = true                 ; disable to hide the OAuth2 login options
+
+; ── Federation (ActivityPub) ──────────────────────────────────────────────────
+[federation]
+;ENABLED = false                ; enable to allow following users across instances
+
+; ── Migrations ────────────────────────────────────────────────────────────────
+[migrations]
+; Prevent repository migrations from targeting internal network addresses.
+;ALLOW_LOCALNETWORKS  = false
+;ALLOWED_DOMAINS      =        ; comma-separated allowlist (empty = allow all)
+;BLOCKED_DOMAINS      =        ; comma-separated blocklist
+
+; ── Webhooks ──────────────────────────────────────────────────────────────────
+[webhook]
+; Restrict which hosts webhooks may call (loopback is blocked by default).
+;ALLOWED_HOST_LIST = external  ; external | * | comma-separated hosts/CIDRs
+
+; ── Logging ───────────────────────────────────────────────────────────────────
 [log]
 MODE  = console
 LEVEL = warn
+;LEVEL = info                   ; use 'info' or 'debug' when troubleshooting
