@@ -227,6 +227,25 @@ When the user connects, OpenSSH automatically uses both files together:
 
 The private key is used only in step 4, locally on the client. It is never transmitted.
 
+### Security advantage of certificates over plain public keys
+
+This setup enforces two independent checks before an SSH session is accepted:
+
+1. **sshd**: the connecting key must carry a valid CA signature (`TrustedUserCAKeys`)
+2. **Forgejo**: the cert's base public key must be registered to a user account (`AuthorizedKeysCommand`)
+
+Both must pass. The cert layer adds the following over plain public key auth:
+
+**Yubikey-gated issuance separates two privileges.** With plain keys, anyone who can add a key to a Forgejo account can grant themselves SSH access. With certs, granting SSH access requires physical Yubikey presence and PIN — a hardware-gated step that Forgejo admin credentials alone cannot bypass.
+
+**Automatic expiry.** A plain public key registered in Forgejo is valid until manually deleted. Certs carry a built-in validity window (365 days by default). A user who leaves the org loses SSH access when their cert expires, even if someone forgets to clean up their Forgejo account.
+
+**Stolen public keys are useless without a cert.** SSH public keys are freely shareable by design and often appear in GitHub profiles, dotfiles repos, etc. If an attacker obtains a user's `id_ed25519.pub`, they cannot connect — sshd rejects the session because there is no CA signature. With plain key auth, the registered public key is the only barrier.
+
+**Immediate revocation independent of Forgejo.** A specific cert can be revoked by key ID via `/etc/ssh/revoked_keys` on the VPS without touching the Forgejo database.
+
+**What certificates do not protect against.** If an attacker steals a user's private key *and* has the matching cert, they have full access until the cert expires or is explicitly revoked. Certificates do not substitute for protecting the private key — that is the role of a strong passphrase or a device-bound key (e.g. a hardware token or `sk-ed25519` resident key).
+
 ### Auto-generated keypairs (batch mode)
 
 When `sign-user-key.sh --batch` auto-generates a keypair (no key column in the CSV), the admin holds both the private key and the cert. The private key must be transmitted to the user via a secure out-of-band channel (encrypted email, password manager share, etc.) before they can authenticate.
