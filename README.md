@@ -97,26 +97,19 @@ Use `--debug` to run certbot against the staging CA (faster iteration; certifica
    ```
    ./sign-user-key.sh <forgejo-username> /path/to/user_key.pub
    ```
-   Requires Yubikey present (prompts for PIN + touch). Produces `<user_key>-cert.pub`.
+   Requires Yubikey present (prompts for PIN + touch). Produces `<user_key>-cert.pub`. The script also creates the Forgejo user account (if absent) and registers the public key automatically via the admin API.
 3. Send `<user_key>-cert.pub` back to the user
 4. User places it alongside their private key:
    ```
    ~/.ssh/id_ed25519-cert.pub   # if private key is id_ed25519
    ```
    SSH picks it up automatically — no `~/.ssh/config` change needed.
-5. Admin registers the user's **raw** public key in Forgejo (required for `AuthorizedKeysCommand` to map the cert to the right user account):
-   ```
-   # Via Forgejo admin API
-   curl -X POST https://<ip>/api/v1/admin/users/<username>/keys \
-     -H "Authorization: token <admin-token>" \
-     -H "Content-Type: application/json" \
-     -d '{"key": "<contents of user_key.pub>", "title": "my-key"}'
-   ```
-   Or via the web UI: admin panel → users → edit user → SSH keys.
-6. User clones with:
+5. User clones with:
    ```
    git clone ssh://git@<ip>:2222/<username>/<repo>.git
    ```
+
+Pass `--no-register` to skip Forgejo registration (sign cert only).
 
 ### Batch onboarding
 

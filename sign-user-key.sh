@@ -2,7 +2,7 @@
 # sign-user-key.sh — Issue an SSH certificate for one or more Forgejo users.
 #
 # Single-user mode:
-#   ./sign-user-key.sh <forgejo-username> <user-public-key-file>
+#   ./sign-user-key.sh <forgejo-username> <user-public-key-file> [options]
 #
 # Batch mode:
 #   ./sign-user-key.sh --batch <csv-file> [options]
@@ -14,11 +14,13 @@
 #   username,ssh-ed25519 AAAA...
 #   (no key column → ed25519 keypair is auto-generated for that user)
 #
-# Batch options:
-#   --output-dir DIR    Write keys and certs here (default: ./keys)
+# Options (both modes):
 #   --forgejo-url URL   Forgejo base URL (default: https://<terraform output ip>)
 #   --admin-token TOK   Forgejo admin API token (default: auto-generated via SSH)
-#   --no-register       Sign certs only; skip Forgejo user/key registration
+#   --no-register       Sign cert(s) only; skip Forgejo user/key registration
+#
+# Batch-only options:
+#   --output-dir DIR    Write keys and certs here (default: ./keys)
 #
 # Environment overrides: FORGEJO_URL, FORGEJO_ADMIN_TOKEN, ADMIN_SSH_KEY, CERT_VALIDITY
 #
@@ -50,22 +52,149 @@ ykman info &>/dev/null || error "No Yubikey detected. Connect your Yubikey and t
 
 VALIDITY="${CERT_VALIDITY:-+365d}"
 
-# ── JSON helper (builds a properly-escaped JSON string value) ─────────────────
-json_str() { python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))"; }
+# ── Shared helpers ────────────────────────────────────────────────────────────
+
+# Resolve Forgejo URL and admin token into FORGEJO_URL and ADMIN_TOKEN globals.
+resolve_forgejo_credentials() {
+    if [[ -z "$FORGEJO_URL" ]]; then
+        local _ip=""
+        if command -v terraform &>/dev/null; then
+            # Try last-used provider's terraform dir first
+            local _last_provider=""
+            [[ -f "$SCRIPT_DIR/.last-provider" ]] && _last_provider="$(cat "$SCRIPT_DIR/.last-provider" | tr -d '[:space:]')"
+            local _tf_dirs=("$SCRIPT_DIR/terraform")
+            [[ "$_last_provider" == "aws" ]] && _tf_dirs=("$SCRIPT_DIR/terraform/aws" "$SCRIPT_DIR/terraform")
+            for _dir in "${_tf_dirs[@]}"; do
+                [[ -d "$_dir" ]] || continue
+                _ip="$(cd "$_dir" && terraform output -raw public_ipv4 2>/dev/null || true)"
+                [[ -n "$_ip" ]] && break
+            done
+        fi
+        [[ -n "$_ip" ]] || error "Cannot determine Forgejo URL. Pass --forgejo-url URL or set FORGEJO_URL."
+        FORGEJO_URL="https://${_ip}"
+        info "Forgejo URL (from Terraform): $FORGEJO_URL"
+    fi
+
+    if [[ -z "$ADMIN_TOKEN" ]]; then
+        local _ip="${FORGEJO_URL#https://}"; _ip="${_ip#http://}"; _ip="${_ip%%/*}"
+        local _admin_user="gitadmin"
+        if [[ -f "$SCRIPT_DIR/.vault.token" ]]; then
+            export VAULT_ADDR="http://127.0.0.1:8200"
+            export VAULT_TOKEN="$(cat "$SCRIPT_DIR/.vault.token")"
+            if vault status &>/dev/null 2>&1; then
+                local _vu
+                _vu="$(vault kv get -field=forgejo_admin_user secret/forgejo/deploy 2>/dev/null || true)"
+                [[ -n "$_vu" ]] && _admin_user="$_vu"
+            fi
+        fi
+        local _ssh_key="${ADMIN_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+        local _kh="$SCRIPT_DIR/known_hosts.deploy"
+        local _ssh_opts="-i $_ssh_key -o ConnectTimeout=15 -o BatchMode=yes"
+        [[ -f "$_kh" ]] \
+            && _ssh_opts="$_ssh_opts -o UserKnownHostsFile=$_kh -o StrictHostKeyChecking=yes" \
+            || _ssh_opts="$_ssh_opts -o StrictHostKeyChecking=no"
+        info "Generating admin API token via SSH (admin user: $_admin_user)..."
+        ADMIN_TOKEN="$(ssh $_ssh_opts "root@$_ip" \
+            "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
+             generate-access-token --username $_admin_user \
+             --token-name sign-$(date +%s) --raw 2>&1" 2>/dev/null || true)"
+        [[ -n "$ADMIN_TOKEN" ]] \
+            || error "Could not obtain admin token. Pass --admin-token TOKEN or set FORGEJO_ADMIN_TOKEN."
+        info "Admin token obtained."
+    fi
+}
+
+# Create user (if absent) and register their public key in Forgejo.
+# Args: username pubkey_file
+register_user() {
+    local username="$1" pubkey="$2"
+    local _domain="${FORGEJO_URL#https://}"; _domain="${_domain#http://}"; _domain="${_domain%%/*}"
+
+    info "  ── $username"
+
+    local _status
+    _status="$(curl -sk -o /dev/null -w '%{http_code}' \
+        -H "Authorization: token $ADMIN_TOKEN" \
+        "$FORGEJO_URL/api/v1/users/$username" || true)"
+
+    if [[ "$_status" == "404" ]]; then
+        local _pass _body _code
+        _pass="$(openssl rand -base64 16 | tr -d '=/+')"
+        _body="$(python3 -c "
+import json
+print(json.dumps({
+    'email':                '${username}@${_domain}',
+    'login_name':           '${username}',
+    'must_change_password': False,
+    'password':             '$_pass',
+    'source_id':            0,
+    'username':             '${username}',
+}))")"
+        _code="$(curl -sk -o /dev/null -w '%{http_code}' \
+            -X POST "$FORGEJO_URL/api/v1/admin/users" \
+            -H "Authorization: token $ADMIN_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$_body" || true)"
+        if [[ "$_code" == "201" ]]; then
+            info "    ✓ user created (email: ${username}@${_domain})"
+        else
+            warn "    ✗ failed to create user (HTTP $_code)"
+            return 1
+        fi
+    elif [[ "$_status" == "200" ]]; then
+        info "    user already exists"
+    else
+        warn "    ✗ user lookup returned HTTP $_status"
+        return 1
+    fi
+
+    local _key_body _kcode
+    _key_body="$(python3 -c "
+import json
+key = open('$pubkey').read().strip()
+print(json.dumps({
+    'key':       key,
+    'read_only': False,
+    'title':     '${username}-$(date +%Y%m%d)',
+}))")"
+    _kcode="$(curl -sk -o /dev/null -w '%{http_code}' \
+        -X POST "$FORGEJO_URL/api/v1/admin/users/$username/keys" \
+        -H "Authorization: token $ADMIN_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$_key_body" || true)"
+    if [[ "$_kcode" == "201" ]]; then
+        info "    ✓ SSH key registered"
+    elif [[ "$_kcode" == "422" ]]; then
+        info "    key already registered"
+    else
+        warn "    ✗ key registration failed (HTTP $_kcode)"
+        return 1
+    fi
+}
 
 # ── Single-user mode ──────────────────────────────────────────────────────────
 if [[ "${1:-}" != "--batch" ]]; then
-    [ "$#" -eq 2 ] || error "Usage: $0 <forgejo-username> <user-public-key-file>
-       $0 --batch <csv-file> [--output-dir DIR] [--forgejo-url URL]
-                             [--admin-token TOKEN] [--no-register]"
+    [ "$#" -ge 2 ] || error "Usage: $0 <forgejo-username> <user-public-key-file> [--forgejo-url URL] [--admin-token TOKEN] [--no-register]
+       $0 --batch <csv-file> [--output-dir DIR] [--forgejo-url URL] [--admin-token TOKEN] [--no-register]"
     USERNAME="$1"
     USER_PUBKEY="$2"
+    shift 2
     [ -f "$USER_PUBKEY" ] || error "Public key file not found: $USER_PUBKEY"
 
+    FORGEJO_URL="${FORGEJO_URL:-}"
+    ADMIN_TOKEN="${FORGEJO_ADMIN_TOKEN:-}"
+    REGISTER=true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --forgejo-url) FORGEJO_URL="$2"; shift 2 ;;
+            --admin-token) ADMIN_TOKEN="$2"; shift 2 ;;
+            --no-register) REGISTER=false; shift ;;
+            *) error "Unknown option: $1" ;;
+        esac
+    done
+
     info "Signing public key for Forgejo user '$USERNAME' (validity: $VALIDITY)"
-    # Principal must be 'git' (the Unix login user for all Forgejo SSH connections).
-    # The Forgejo user is identified by the registered base public key via
-    # AuthorizedKeysCommand, not by the cert principal.
     info "Principal: git (Unix login user)"
     info "Key file:  $USER_PUBKEY"
     echo
@@ -80,10 +209,17 @@ if [[ "${1:-}" != "--batch" ]]; then
         "$USER_PUBKEY"
 
     CERT_FILE="${USER_PUBKEY%.*}-cert.pub"
-    if [ ! -f "$CERT_FILE" ]; then
-        CERT_FILE="${USER_PUBKEY}-cert.pub"
-    fi
+    [ -f "$CERT_FILE" ] || CERT_FILE="${USER_PUBKEY}-cert.pub"
     [ -f "$CERT_FILE" ] || error "Certificate file not found after signing. Check ssh-keygen output above."
+
+    if $REGISTER; then
+        echo
+        resolve_forgejo_credentials
+        echo
+        header "Registering in Forgejo ($FORGEJO_URL)..."
+        echo
+        register_user "$USERNAME" "$USER_PUBKEY" || true
+    fi
 
     echo
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -94,9 +230,13 @@ if [[ "${1:-}" != "--batch" ]]; then
     echo "    1. Place $CERT_FILE alongside your private key"
     echo "       (e.g. ~/.ssh/id_ed25519-cert.pub if key is ~/.ssh/id_ed25519)"
     echo "       SSH picks it up automatically — no config change needed."
-    echo "    2. Ensure your raw public key is registered in Forgejo"
-    echo "       (Settings → SSH / GPG Keys → Add Key)."
-    echo "    3. Clone with:  git clone git@\$DOMAIN:2222/user/repo.git"
+    if $REGISTER; then
+        echo "    2. Public key registered in Forgejo — ready to clone."
+    else
+        echo "    2. Register the raw public key in Forgejo"
+        echo "       (Settings → SSH / GPG Keys → Add Key)."
+    fi
+    echo "    3. Clone with:  git clone ssh://git@<ip>:2222/<username>/<repo>.git"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     exit 0
 fi
@@ -265,50 +405,7 @@ echo
 declare -a REGISTER_FAILED=()
 
 if $REGISTER; then
-    # Resolve Forgejo URL
-    if [[ -z "$FORGEJO_URL" ]]; then
-        if command -v terraform &>/dev/null && [[ -d "$SCRIPT_DIR/terraform" ]]; then
-            _ip="$(cd "$SCRIPT_DIR/terraform" && terraform output -raw public_ipv4 2>/dev/null || true)"
-            [[ -n "$_ip" ]] && FORGEJO_URL="https://${_ip}"
-        fi
-        [[ -n "$FORGEJO_URL" ]] \
-            || error "Cannot determine Forgejo URL. Pass --forgejo-url URL or set FORGEJO_URL."
-        info "Forgejo URL (from Terraform): $FORGEJO_URL"
-    fi
-
-    # Resolve admin token
-    if [[ -z "$ADMIN_TOKEN" ]]; then
-        _ip="${FORGEJO_URL#https://}"; _ip="${_ip#http://}"; _ip="${_ip%%/*}"
-
-        _admin_user="gitadmin"
-        if [[ -f "$SCRIPT_DIR/.vault.token" ]]; then
-            export VAULT_ADDR="http://127.0.0.1:8200"
-            export VAULT_TOKEN="$(cat "$SCRIPT_DIR/.vault.token")"
-            if vault status &>/dev/null 2>&1; then
-                _vu="$(vault kv get -field=forgejo_admin_user secret/forgejo/deploy 2>/dev/null || true)"
-                [[ -n "$_vu" ]] && _admin_user="$_vu"
-            fi
-        fi
-
-        _ssh_key="${ADMIN_SSH_KEY:-$HOME/.ssh/id_ed25519}"
-        _kh="$SCRIPT_DIR/known_hosts.deploy"
-        _ssh_opts="-i $_ssh_key -o ConnectTimeout=15 -o BatchMode=yes"
-        [[ -f "$_kh" ]] \
-            && _ssh_opts="$_ssh_opts -o UserKnownHostsFile=$_kh -o StrictHostKeyChecking=yes" \
-            || _ssh_opts="$_ssh_opts -o StrictHostKeyChecking=no"
-
-        info "Generating admin API token via SSH (admin user: $_admin_user)..."
-        ADMIN_TOKEN="$(ssh $_ssh_opts "root@$_ip" \
-            "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
-             generate-access-token --username $_admin_user \
-             --token-name batch-sign-$(date +%s) --raw 2>&1" 2>/dev/null || true)"
-
-        [[ -n "$ADMIN_TOKEN" ]] \
-            || error "Could not obtain admin token. Pass --admin-token TOKEN or set FORGEJO_ADMIN_TOKEN."
-        info "Admin token obtained."
-    fi
-
-    _domain="${FORGEJO_URL#https://}"; _domain="${_domain#http://}"; _domain="${_domain%%/*}"
+    resolve_forgejo_credentials
     echo
     header "Registering in Forgejo ($FORGEJO_URL)..."
     echo
@@ -320,68 +417,7 @@ if $REGISTER; then
 
         [[ -n "$pubkey" && -n "$cert" ]] || continue
 
-        info "  ── $username"
-
-        # Create user if not present
-        _status="$(curl -sk -o /dev/null -w '%{http_code}' \
-            -H "Authorization: token $ADMIN_TOKEN" \
-            "$FORGEJO_URL/api/v1/users/$username" || true)"
-
-        if [[ "$_status" == "404" ]]; then
-            _pass="$(openssl rand -base64 16 | tr -d '=/+')"
-            _body="$(python3 -c "
-import json
-print(json.dumps({
-    'email':               '${username}@${_domain}',
-    'login_name':          '${username}',
-    'must_change_password': False,
-    'password':            '$_pass',
-    'source_id':           0,
-    'username':            '${username}',
-}))")"
-            _code="$(curl -sk -o /dev/null -w '%{http_code}' \
-                -X POST "$FORGEJO_URL/api/v1/admin/users" \
-                -H "Authorization: token $ADMIN_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "$_body" || true)"
-            if [[ "$_code" == "201" ]]; then
-                info "    ✓ user created (email: ${username}@${_domain})"
-            else
-                warn "    ✗ failed to create user (HTTP $_code)"
-                REGISTER_FAILED+=("$username")
-                continue
-            fi
-        elif [[ "$_status" == "200" ]]; then
-            info "    user already exists"
-        else
-            warn "    ✗ user lookup returned HTTP $_status"
-            REGISTER_FAILED+=("$username")
-            continue
-        fi
-
-        # Register public key
-        _key_body="$(python3 -c "
-import json, sys
-key = open('$pubkey').read().strip()
-print(json.dumps({
-    'key':       key,
-    'read_only': False,
-    'title':     '${username}-$(date +%Y%m%d)',
-}))")"
-        _kcode="$(curl -sk -o /dev/null -w '%{http_code}' \
-            -X POST "$FORGEJO_URL/api/v1/admin/users/$username/keys" \
-            -H "Authorization: token $ADMIN_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$_key_body" || true)"
-
-        if [[ "$_kcode" == "201" ]]; then
-            info "    ✓ SSH key registered"
-        elif [[ "$_kcode" == "422" ]]; then
-            info "    key already registered"
-        else
-            warn "    ✗ key registration failed (HTTP $_kcode)"
-            REGISTER_FAILED+=("$username")
-        fi
+        register_user "$username" "$pubkey" || REGISTER_FAILED+=("$username")
     done
 fi
 
