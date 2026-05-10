@@ -27,16 +27,16 @@ while [[ $# -gt 0 ]]; do
             warn "Debug mode: certbot will use staging CA and verbose logs."
             shift ;;
         --provider)
-            [[ $# -ge 2 ]] || error "--provider requires a value (vultr|aws)"
+            [[ $# -ge 2 ]] || error "--provider requires a value (vultr|aws|azure)"
             PROVIDER="$2"
             shift 2 ;;
         *)
-            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws] [--debug]" ;;
+            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--debug]" ;;
     esac
 done
 
-if [[ -n "$PROVIDER" && "$PROVIDER" != "vultr" && "$PROVIDER" != "aws" ]]; then
-    error "Invalid provider '$PROVIDER'. Use vultr or aws."
+if [[ -n "$PROVIDER" && "$PROVIDER" != "vultr" && "$PROVIDER" != "aws" && "$PROVIDER" != "azure" ]]; then
+    error "Invalid provider '$PROVIDER'. Use vultr, aws, or azure."
 fi
 
 # If not specified, default to last used provider (or prompt)
@@ -49,10 +49,10 @@ if [[ -z "$PROVIDER" ]]; then
         [[ -n "$_p" ]] && DEFAULT_PROVIDER="$_p"
     fi
 
-    read -rp "[provision] Cloud provider (vultr/aws) [${DEFAULT_PROVIDER}]: " _prov
+    read -rp "[provision] Cloud provider (vultr/aws/azure) [${DEFAULT_PROVIDER}]: " _prov
     PROVIDER="${_prov:-$DEFAULT_PROVIDER}"
-    [[ "$PROVIDER" == "vultr" || "$PROVIDER" == "aws" ]] \
-        || error "Invalid provider '$PROVIDER'. Use vultr or aws."
+    [[ "$PROVIDER" == "vultr" || "$PROVIDER" == "aws" || "$PROVIDER" == "azure" ]] \
+        || error "Invalid provider '$PROVIDER'. Use vultr, aws, or azure."
 fi
 
 info "Provider: $PROVIDER"
@@ -134,6 +134,34 @@ case "$PROVIDER" in
         export AWS_ACCESS_KEY_ID="$(tr -d '[:space:]' < aws_access_key)"
         export AWS_SECRET_ACCESS_KEY="$(tr -d '[:space:]' < aws_secret_access_key)"
         TF_DIR="$SCRIPT_DIR/terraform/aws"
+        ;;
+    azure)
+        [ -f azure_credentials ] || error "azure_credentials file not found in $SCRIPT_DIR"
+        # Parse JSON credentials; support both az-cli field names (appId/password/tenant)
+        # and the SDK-auth aliases (clientId/clientSecret/tenantId/subscriptionId).
+        # shlex.quote ensures values with special characters are safely shell-escaped.
+        eval "$(python3 - <<'PY'
+import json, sys, shlex
+try:
+    d = json.load(open("azure_credentials"))
+except Exception as e:
+    sys.exit(f"Cannot parse azure_credentials: {e}")
+def get(key, *aliases):
+    for k in (key,) + aliases:
+        if k in d and d[k]:
+            return d[k]
+    sys.exit(f"azure_credentials: missing required field '{key}' (aliases checked: {aliases})")
+pairs = [
+    ("ARM_CLIENT_ID",       get("clientId",     "appId")),
+    ("ARM_CLIENT_SECRET",   get("clientSecret",  "password")),
+    ("ARM_SUBSCRIPTION_ID", get("subscriptionId")),
+    ("ARM_TENANT_ID",       get("tenantId",      "tenant")),
+]
+for k, v in pairs:
+    print(f"export {k}={shlex.quote(v)}")
+PY
+        )"
+        TF_DIR="$SCRIPT_DIR/terraform/azure"
         ;;
 esac
 

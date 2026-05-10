@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (gitignored) and adjust as needed.
+# admin_ssh_public_key is supplied via TF_VAR_admin_ssh_public_key by provision.sh
+# (read from Vault) — do NOT set it here.
+
+region   = "eastus"       # East US; see: azure.microsoft.com/en-us/explore/global-infrastructure/geographies
+plan     = "Standard_B1s" # 1 vCPU, 1 GB RAM (~$7.59/mo); smallest size that reliably runs Forgejo+Postgres
+hostname = "forgejo"

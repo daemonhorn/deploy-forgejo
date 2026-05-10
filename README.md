@@ -26,6 +26,7 @@ You also need cloud provider credentials:
 
 - **Vultr**: save your API key to a file named `vultr_api_key` in this directory (gitignored)
 - **AWS**: save your access key ID to `aws_access_key` and secret to `aws_secret_access_key` (both gitignored)
+- **Azure**: save a service principal JSON to `azure_credentials` (gitignored) — see the [Azure section](#azure) below for the required format
 
 ## First-time setup
 
@@ -76,7 +77,8 @@ Idempotent. Each run:
 ```
 ./provision.sh --provider vultr
 ./provision.sh --provider aws
-./provision.sh          # prompts: "Cloud provider (vultr/aws) [vultr]:"
+./provision.sh --provider azure
+./provision.sh          # prompts: "Cloud provider (vultr/aws/azure) [vultr]:"
 ```
 
 The last-used provider is saved to `.last-provider` (gitignored) so re-runs default to the same provider without prompting.
@@ -183,9 +185,15 @@ terraform/
     variables.tf
     outputs.tf
     terraform.tfvars.example
+  azure/                        # Azure Terraform root
+    main.tf
+    variables.tf
+    outputs.tf
+    terraform.tfvars.example
   modules/providers/
     vultr/                      # Vultr instance, firewall, SSH key
     aws/                        # AWS EC2 instance, security group, key pair
+    azure/                      # Azure VM, NSG, VNet, public IP
 files/
   docker-compose.yml            # Forgejo, PostgreSQL, nginx, certbot
   sshd_forgejo.conf             # sshd config for port 2222
@@ -283,6 +291,41 @@ Default region: `us-east-1` (N. Virginia). Default plan: `t3.micro` (2 vCPU, 1 G
 The Debian 12 AMI is resolved at apply time via a data source querying the official Debian AWS account (`136693071363`), so it always uses the latest published image.
 
 AWS Debian instances default to the `admin` user. The instance `user_data` script copies `admin`'s `authorized_keys` to `root` and enables `PermitRootLogin prohibit-password`, so `provision.sh` can SSH as root consistently across providers.
+
+### Azure
+
+Config in `terraform/azure/terraform.tfvars` (created automatically from the example on first run). Credentials in `azure_credentials` (JSON, gitignored).
+
+Default region: `eastus` (East US). Default plan: `Standard_B1s` (1 vCPU, 1 GB RAM, ~$7.59/month) — the smallest Azure VM size that reliably runs Forgejo + PostgreSQL + nginx. `Standard_B1ls` (0.5 GB RAM, ~$3.80/month) exists but risks OOM under normal load.
+
+**Creating the service principal:**
+
+```bash
+# Obtain your subscription ID
+az account show --query id -o tsv
+
+# Create a service principal with Contributor rights scoped to the subscription
+az ad sp create-for-rbac \
+  --name forgejo-deploy \
+  --role Contributor \
+  --scopes /subscriptions/<subscription-id> \
+  --output json
+```
+
+Save the output as `azure_credentials` in this directory. Both the current az CLI format (`appId`/`password`/`tenant`) and the older SDK-auth format (`clientId`/`clientSecret`/`tenantId`) are accepted. If using the newer format, add `subscriptionId` manually:
+
+```json
+{
+  "clientId":       "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "clientSecret":   "your-client-secret",
+  "subscriptionId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "tenantId":       "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+}
+```
+
+The `azure_credentials` file is gitignored. `provision.sh` reads it via `python3` (standard on all platforms) and exports the `ARM_*` environment variables consumed by the `azurerm` Terraform provider.
+
+The image is Debian 12 (`debian-12` / `12-gen2`) from the official Debian publisher on Azure Marketplace. The VM's `custom_data` script copies the SSH key to root so `provision.sh` can connect as root consistently across all providers.
 
 ### Adding another provider
 

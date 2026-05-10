@@ -31,7 +31,7 @@ Automates deployment of a [Forgejo](https://forgejo.org/) container instance on 
 - **Inputs**: `ssh_public_key`, `region`, `plan`, `hostname`, `firewall_ports`
 - **Outputs**: `public_ipv4`, `ssh_user`, `instance_id`
 
-`terraform/main.tf` selects a module via `var.provider_name` (default `"vultr"`). Adding AWS/GCP = new module directory with identical interface; no other files change.
+`terraform/main.tf` selects a module via `var.provider_name` (default `"vultr"`). Adding a new provider = new module directory + new `terraform/<name>/` root; no other files change.
 
 ### Secret Flow
 
@@ -106,9 +106,19 @@ Before running `setup.sh`:
 ## Adding a New Cloud Provider
 
 1. Create `terraform/modules/providers/<name>/` with `main.tf`, `variables.tf`, `outputs.tf`
-2. Implement the same input variable names and output names as `vultr/`
-3. Set `provider_name = "<name>"` in `terraform/terraform.tfvars` and supply the provider's API key via `TF_VAR_` env vars
-4. No changes to `provision.sh`, `deploy.sh`, or any file under `files/`
+2. Implement the same input variable names and output names as `vultr/` and `azure/`
+3. Create `terraform/<name>/` root with `main.tf`, `variables.tf`, `outputs.tf`, `terraform.tfvars.example`
+4. Add a `<name>)` case to `provision.sh` (credential loading + `TF_DIR` assignment)
+5. Update `sign-user-key.sh` provider check for the new `terraform/<name>/` Terraform output directory
+6. No changes to `deploy.sh` or any file under `files/`
+
+## Supported Cloud Providers
+
+| Provider | Credentials file | Terraform root | Default plan |
+|---|---|---|---|
+| `vultr` | `vultr_api_key` | `terraform/` | `vc2-1c-0.5gb` |
+| `aws` | `aws_access_key` + `aws_secret_access_key` | `terraform/aws/` | `t3.micro` |
+| `azure` | `azure_credentials` (JSON) | `terraform/azure/` | `Standard_B1s` |
 
 ## TLS / Domain
 
