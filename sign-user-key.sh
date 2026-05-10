@@ -93,8 +93,10 @@ resolve_forgejo_credentials() {
         [[ -f "$_kh" ]] \
             && _ssh_opts="$_ssh_opts -o UserKnownHostsFile=$_kh -o StrictHostKeyChecking=yes" \
             || _ssh_opts="$_ssh_opts -o StrictHostKeyChecking=no"
-        info "Generating admin API token via SSH (admin user: $_admin_user)..."
-        ADMIN_TOKEN="$(ssh $_ssh_opts "root@$_ip" \
+        # SSH as deploy (docker group member); root login is disabled after hardening.
+        # deploy has docker group access so it can run docker exec without sudo.
+        info "Generating admin API token via SSH as deploy@$_ip (admin user: $_admin_user)..."
+        ADMIN_TOKEN="$(ssh $_ssh_opts "deploy@$_ip" \
             "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
              generate-access-token --username $_admin_user \
              --token-name sign-$(date +%s) --raw 2>&1" 2>/dev/null || true)"
