@@ -76,7 +76,7 @@ Use `--debug` to run certbot against the staging CA (faster iteration; certifica
 
 ## Adding a user
 
-Users authenticate via CA-signed SSH certificates. The workflow:
+### Single user
 
 1. User sends you their SSH public key (`~/.ssh/id_ed25519.pub` or similar)
 2. Admin runs:
@@ -103,6 +103,49 @@ Users authenticate via CA-signed SSH certificates. The workflow:
    ```
    git clone ssh://git@<ip>:2222/<username>/<repo>.git
    ```
+
+### Batch onboarding
+
+For multiple users at once, create a CSV file and run batch mode. The Yubikey signs all keys in one session; Forgejo user accounts and public keys are registered automatically.
+
+```
+./sign-user-key.sh --batch users.csv [--output-dir DIR] [--no-register]
+```
+
+**CSV format** — one user per line; blank lines and `#` comments ignored; optional `username,key` header is skipped:
+
+```csv
+# username[,key]
+# key = /path/to/key.pub  |  ssh-ed25519 AAAA...  |  (empty = auto-generate)
+
+alice                                    # keypair generated in keys/alice/
+bob,/home/bob/.ssh/id_ed25519.pub        # use existing key file
+carol,ssh-ed25519 AAAAC3Nz...            # inline public key string
+```
+
+**Output** — written to `./keys/<username>/` by default:
+
+| File | Present when |
+|---|---|
+| `id_ed25519` | Key was auto-generated (private — distribute securely) |
+| `id_ed25519.pub` | Key was auto-generated |
+| `*-cert.pub` | Always — the CA-signed certificate to give the user |
+
+**Options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--output-dir DIR` | `./keys` | Where to write generated keys and certs |
+| `--forgejo-url URL` | Derived from `terraform output` | Forgejo base URL |
+| `--admin-token TOKEN` | Auto-generated via SSH | Forgejo admin API token |
+| `--no-register` | — | Sign certs only; skip Forgejo account/key setup |
+
+`FORGEJO_URL`, `FORGEJO_ADMIN_TOKEN`, and `ADMIN_SSH_KEY` env vars override auto-detection.
+
+**What each user receives:**
+- The `*-cert.pub` file — place as `~/.ssh/<keyname>-cert.pub` alongside their private key
+- Their private key (auto-generated users only) — send via a secure channel
+- No Forgejo web UI action needed; the admin API registration handles key lookup
 
 ## SSH auth internals
 
