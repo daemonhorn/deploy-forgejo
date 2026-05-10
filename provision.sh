@@ -271,51 +271,34 @@ fetch_azure_plans() {
     local file="$CACHE_DIR/azure-plans-${region}.json"
     mkdir -p "$CACHE_DIR"
     if python3 - "$file" "$region" <<'PY'
-import json, sys, time, urllib.request, urllib.parse, os
+import json, sys, time, subprocess, urllib.request, urllib.parse
 TARGET = ['Standard_B1ls', 'Standard_B1s', 'Standard_B1ms', 'Standard_B2s', 'Standard_B2ms']
 SPECS  = {'Standard_B1ls': '1C/512MB', 'Standard_B1s': '1C/1GB', 'Standard_B1ms': '1C/2GB',
           'Standard_B2s': '2C/4GB', 'Standard_B2ms': '2C/8GB'}
 NOTES  = {'Standard_B1ls': '(not recommended: OOM risk with Forgejo+Postgres)',
           'Standard_B1s':  '(recommended minimum)'}
 file, region = sys.argv[1], sys.argv[2]
-client_id       = os.environ['ARM_CLIENT_ID']
-client_secret   = os.environ['ARM_CLIENT_SECRET']
-tenant_id       = os.environ['ARM_TENANT_ID']
-subscription_id = os.environ['ARM_SUBSCRIPTION_ID']
 try:
-    # 1. OAuth2 client_credentials token
-    token_body = urllib.parse.urlencode({
-        'grant_type': 'client_credentials', 'client_id': client_id,
-        'client_secret': client_secret, 'resource': 'https://management.azure.com/',
-    }).encode()
-    with urllib.request.urlopen(
-        f"https://login.microsoftonline.com/{tenant_id}/oauth2/token",
-        token_body, timeout=15
-    ) as r:
-        token = json.load(r)['access_token']
-
-    # 2. Paginate Compute SKU list for region; check for Location-type restrictions
-    hdrs = {'Authorization': f'Bearer {token}'}
-    url  = (f"https://management.azure.com/subscriptions/{subscription_id}"
-            f"/providers/Microsoft.Compute/skus?api-version=2021-07-01"
-            f"&$filter=location+eq+%27{urllib.parse.quote(region)}%27")
+    # az vm list-skus gives accurate per-subscription availability including capacity restrictions
+    out = subprocess.run(
+        ['az', 'vm', 'list-skus', '--location', region,
+         '--resource-type', 'virtualMachines', '--size', 'Standard_B',
+         '--output', 'json'],
+        capture_output=True, text=True, timeout=120
+    )
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip() or 'az vm list-skus failed')
     available = set()
-    while url:
-        req = urllib.request.Request(url, headers=hdrs)
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.load(r)
-        for sku in data.get('value', []):
-            if sku.get('resourceType') != 'virtualMachines':
-                continue
-            name = sku.get('name', '')
-            if name not in TARGET:
-                continue
-            restricted = any(r2.get('type') == 'Location' for r2 in sku.get('restrictions', []))
-            if not restricted:
-                available.add(name)
-        url = data.get('nextLink')
+    for sku in json.loads(out.stdout):
+        name = sku.get('name', '')
+        if name not in TARGET:
+            continue
+        # Location-type restriction means the SKU cannot be deployed in this region
+        restricted = any(r.get('type') == 'Location' for r in sku.get('restrictions', []))
+        if not restricted:
+            available.add(name)
 
-    # 3. Region-specific pricing from public Azure Retail Prices API
+    # Region-specific pricing from the public Azure Retail Prices API (no auth required)
     prices = {}
     if available:
         parts     = [f"armSkuName eq '{s}'" for s in available]
@@ -351,7 +334,7 @@ except Exception as e:
     sys.exit(1)
 PY
     then
-        info "Fetched Azure VM availability and pricing for ${region}."
+        info "Fetched Azure VM availability for ${region} via az vm list-skus."
     else
         return 1
     fi
