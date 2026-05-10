@@ -26,6 +26,9 @@ terraform/aws/.terraform.lock.hcl
 # Provider selection state
 .last-provider
 
+# Provider data cache (refreshed daily; not secrets)
+.cache/
+
 # Deploy artifacts
 known_hosts.deploy
 

@@ -10,6 +10,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+CACHE_DIR="${SCRIPT_DIR}/.cache"
+CACHE_TTL=86400  # seconds — refresh provider data at most once per day
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[provision]${NC} $*"; }
@@ -59,9 +61,210 @@ show_menu() {
     done
 }
 
+# ── Cache helpers ─────────────────────────────────────────────────────────────
+
+# Return the 'ts' field from a JSON cache file, or 0 if missing/unparseable.
+cache_ts() {
+    python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('ts',0))" "$1" 2>/dev/null || echo 0
+}
+
+# Return true if cache file exists AND is younger than CACHE_TTL seconds.
+cache_fresh() {
+    local file="$1"
+    [[ -f "$file" ]] || return 1
+    local ts now
+    ts=$(cache_ts "$file"); now=$(date +%s)
+    (( now - ts < CACHE_TTL ))
+}
+
+# Populate caller's array (nameref $1) with "code:desc" lines from cache file $2.
+load_cache_items() {
+    local -n _lci_arr="$1"; local file="$2"
+    mapfile -t _lci_arr < <(python3 - "$file" <<'PY'
+import json, sys
+for it in json.load(open(sys.argv[1])).get('items', []):
+    print(it['code'] + ':' + it['desc'])
+PY
+    )
+}
+
+# Return a human-readable string describing how fresh the cache file is.
+cache_age_str() {
+    [[ -f "$1" ]] || { echo "static"; return; }
+    local ts now age
+    ts=$(cache_ts "$1"); now=$(date +%s); age=$(( now - ts ))
+    if   (( age < 3600  )); then printf "live, cached %dm ago" $(( age / 60 ))
+    elif (( age < 86400 )); then printf "live, cached %dh ago" $(( age / 3600 ))
+    else                         printf "live, stale (%dd old; use --refresh)" $(( age / 86400 ))
+    fi
+}
+
+# ── Provider data fetch functions ─────────────────────────────────────────────
+# Each writes .cache/<provider>-<type>.json with {"ts": epoch, "items": [...]}
+
+fetch_vultr_regions() {
+    local file="$CACHE_DIR/vultr-regions.json"
+    mkdir -p "$CACHE_DIR"
+    if python3 - "$file" <<'PY'
+import json, sys, time, urllib.request
+try:
+    with urllib.request.urlopen("https://api.vultr.com/v2/regions", timeout=10) as r:
+        data = json.load(r)
+    items = []
+    for reg in sorted(data.get('regions', []), key=lambda x: x.get('id', '')):
+        items.append({
+            'code': reg['id'],
+            'desc': f"{reg.get('city', '')} - {reg.get('country', '')} ({reg.get('continent', '')})"
+        })
+    json.dump({'ts': int(time.time()), 'items': items}, open(sys.argv[1], 'w'))
+    sys.exit(0)
+except Exception as e:
+    print(f"[provision] warning: failed to fetch Vultr regions: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+    then
+        info "Fetched Vultr regions from API."
+    else
+        return 1
+    fi
+}
+
+fetch_vultr_plans() {
+    local file="$CACHE_DIR/vultr-plans.json"
+    mkdir -p "$CACHE_DIR"
+    if python3 - "$file" <<'PY'
+import json, sys, time, urllib.request
+try:
+    with urllib.request.urlopen("https://api.vultr.com/v2/plans?type=vc2&per_page=500", timeout=10) as r:
+        data = json.load(r)
+    plans = []
+    for p in data.get('plans', []):
+        vcpu = p.get('vcpu_count', '?')
+        ram  = p.get('ram', 0)
+        disk = p.get('disk', 0)
+        cost = p.get('monthly_cost', 0)
+        pid  = p.get('id', '')
+        ram_str = f"{ram}MB" if ram < 1024 else f"{ram // 1024}GB"
+        desc = f"{vcpu}C/{ram_str}/{disk}GB NVMe  ${cost:.2f}/mo"
+        if ram < 1024:
+            desc += "  (not recommended: too small for Forgejo+Postgres)"
+        elif ram == 1024 and vcpu == 1:
+            desc += "  (recommended minimum)"
+        plans.append({'code': pid, 'desc': desc})
+    plans.sort(key=lambda x: x['code'])
+    json.dump({'ts': int(time.time()), 'items': plans}, open(sys.argv[1], 'w'))
+    sys.exit(0)
+except Exception as e:
+    print(f"[provision] warning: failed to fetch Vultr plans: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+    then
+        info "Fetched Vultr plans from API."
+    else
+        return 1
+    fi
+}
+
+fetch_aws_regions() {
+    local file="$CACHE_DIR/aws-regions.json"
+    mkdir -p "$CACHE_DIR"
+    if python3 - "$file" <<'PY'
+import json, sys, time, subprocess
+LABELS = {
+    'us-east-1':      'N. Virginia - US East',
+    'us-east-2':      'Ohio - US East',
+    'us-west-1':      'N. California - US West',
+    'us-west-2':      'Oregon - US West',
+    'ca-central-1':   'Canada Central - Montreal',
+    'eu-west-1':      'Ireland - EU',
+    'eu-west-2':      'London - EU',
+    'eu-west-3':      'Paris - EU',
+    'eu-central-1':   'Frankfurt - EU',
+    'eu-north-1':     'Stockholm - EU',
+    'ap-southeast-1': 'Singapore - AP',
+    'ap-southeast-2': 'Sydney - AP',
+    'ap-northeast-1': 'Tokyo - AP',
+    'ap-northeast-2': 'Seoul - AP',
+    'ap-south-1':     'Mumbai - AP',
+    'sa-east-1':      'Sao Paulo - SA',
+    'af-south-1':     'Cape Town - Africa',
+    'me-south-1':     'Bahrain - Middle East',
+}
+try:
+    out = subprocess.run(
+        ['aws', 'ec2', 'describe-regions', '--output', 'json'],
+        capture_output=True, text=True, timeout=15
+    )
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip())
+    data = json.loads(out.stdout)
+    items = []
+    for r in sorted(data.get('Regions', []), key=lambda x: x.get('RegionName', '')):
+        name = r['RegionName']
+        items.append({'code': name, 'desc': LABELS.get(name, name)})
+    json.dump({'ts': int(time.time()), 'items': items}, open(sys.argv[1], 'w'))
+    sys.exit(0)
+except Exception as e:
+    print(f"[provision] warning: failed to fetch AWS regions: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+    then
+        info "Fetched AWS regions via CLI."
+    else
+        return 1
+    fi
+}
+
+fetch_azure_plans() {
+    local file="$CACHE_DIR/azure-plans.json"
+    mkdir -p "$CACHE_DIR"
+    if python3 - "$file" <<'PY'
+import json, sys, time, urllib.request, urllib.parse
+SKUS = ['Standard_B1ls', 'Standard_B1s', 'Standard_B1ms', 'Standard_B2s', 'Standard_B2ms']
+NOTES = {
+    'Standard_B1ls': '1C/512MB  (not recommended: OOM risk with Forgejo+Postgres)',
+    'Standard_B1s':  '1C/1GB    (recommended minimum)',
+    'Standard_B1ms': '1C/2GB',
+    'Standard_B2s':  '2C/4GB',
+    'Standard_B2ms': '2C/8GB',
+}
+try:
+    parts = [f"armSkuName eq '{s}'" for s in SKUS]
+    filt  = "(" + " or ".join(parts) + ") and armRegionName eq 'eastus' and priceType eq 'Consumption'"
+    url   = "https://prices.azure.com/api/retail/prices?$filter=" + urllib.parse.quote(filt)
+    with urllib.request.urlopen(url, timeout=15) as r:
+        data = json.load(r)
+    prices = {}
+    for item in data.get('Items', []):
+        sku = item.get('armSkuName', '')
+        name = item.get('skuName', '')
+        if sku in SKUS and 'Spot' not in name and 'Low Priority' not in name:
+            cost = item.get('retailPrice', 0)
+            if sku not in prices or cost < prices[sku]:
+                prices[sku] = cost
+    items = []
+    for sku in SKUS:
+        cost = prices.get(sku, 0)
+        note = NOTES.get(sku, '')
+        desc = f"{note}  ~${cost * 730:.0f}/mo" if cost > 0 else note
+        items.append({'code': sku, 'desc': desc})
+    json.dump({'ts': int(time.time()), 'items': items}, open(sys.argv[1], 'w'))
+    sys.exit(0)
+except Exception as e:
+    print(f"[provision] warning: failed to fetch Azure plans: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+    then
+        info "Fetched Azure VM plans from pricing API."
+    else
+        return 1
+    fi
+}
+
 # ── CLI arguments ─────────────────────────────────────────────────────────────
 CERTBOT_STAGING=""
 PROVIDER=""
+FORCE_REFRESH=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -73,8 +276,11 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || error "--provider requires a value (vultr|aws|azure)"
             PROVIDER="$2"
             shift 2 ;;
+        --refresh)
+            FORCE_REFRESH=true
+            shift ;;
         *)
-            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--debug]" ;;
+            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--debug]" ;;
     esac
 done
 
@@ -212,93 +418,148 @@ esac
 CURRENT_REGION="$(tfvars_get "${TF_DIR}/terraform.tfvars" region)"
 CURRENT_PLAN="$(tfvars_get "${TF_DIR}/terraform.tfvars" plan)"
 
+mkdir -p "$CACHE_DIR"
+
 case "$PROVIDER" in
     vultr)
         [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="ewr"
         [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN="vc2-1c-1gb"
-        show_menu "Vultr regions (verify at vultr.com/features/datacenter-locations/):" \
-            "$CURRENT_REGION" \
-            "ewr:Piscataway, NJ - US East" \
-            "lax:Los Angeles, CA - US West" \
-            "ord:Chicago, IL - US Central" \
-            "dfw:Dallas, TX - US South" \
-            "sea:Seattle, WA - US West" \
-            "mia:Miami, FL - US South" \
-            "atl:Atlanta, GA - US South" \
-            "fra:Frankfurt - EU" \
-            "ams:Amsterdam - EU" \
-            "lhr:London - EU" \
-            "syd:Sydney - AU" \
-            "sin:Singapore - AP" \
-            "nrt:Tokyo - AP" \
-            "icn:Seoul - AP" \
-            "blr:Bangalore - AP"
+
+        REG_CACHE="$CACHE_DIR/vultr-regions.json"
+        PLAN_CACHE="$CACHE_DIR/vultr-plans.json"
+
+        if $FORCE_REFRESH || ! cache_fresh "$REG_CACHE";  then fetch_vultr_regions || true; fi
+        if $FORCE_REFRESH || ! cache_fresh "$PLAN_CACHE"; then fetch_vultr_plans   || true; fi
+
+        REGIONS=()
+        [[ -f "$REG_CACHE"  ]] && load_cache_items REGIONS "$REG_CACHE"
+        if [[ ${#REGIONS[@]} -eq 0 ]]; then
+            REGIONS=(
+                "ewr:Piscataway, NJ - US East"
+                "lax:Los Angeles, CA - US West"
+                "ord:Chicago, IL - US Central"
+                "dfw:Dallas, TX - US South"
+                "sea:Seattle, WA - US West"
+                "mia:Miami, FL - US South"
+                "atl:Atlanta, GA - US South"
+                "fra:Frankfurt - EU"
+                "ams:Amsterdam - EU"
+                "lhr:London - EU"
+                "syd:Sydney - AU"
+                "sin:Singapore - AP"
+                "nrt:Tokyo - AP"
+                "icn:Seoul - AP"
+                "blr:Bangalore - AP"
+            )
+        fi
+
+        PLANS=()
+        [[ -f "$PLAN_CACHE" ]] && load_cache_items PLANS "$PLAN_CACHE"
+        if [[ ${#PLANS[@]} -eq 0 ]]; then
+            PLANS=(
+                "vc2-1c-0.5gb:1C/512MB/10GB NVMe   ~\$2.50/mo  (not recommended: too small for Forgejo+Postgres)"
+                "vc2-1c-1gb:1C/1GB/25GB NVMe        ~\$6/mo     (recommended minimum)"
+                "vc2-1c-2gb:1C/2GB/55GB NVMe        ~\$12/mo"
+                "vc2-2c-4gb:2C/4GB/80GB NVMe        ~\$24/mo"
+            )
+        fi
+
+        show_menu "Vultr regions ($(cache_age_str "$REG_CACHE"); verify at vultr.com/features/datacenter-locations/):" \
+            "$CURRENT_REGION" "${REGIONS[@]}"
         REGION="$_MENU_RESULT"
-        show_menu "Vultr instance plans (approx; verify current pricing at vultr.com/pricing/):" \
-            "$CURRENT_PLAN" \
-            "vc2-1c-0.5gb:1C/512MB/10GB NVMe   ~\$2.50/mo  (not recommended: too small for Forgejo+Postgres)" \
-            "vc2-1c-1gb:1C/1GB/25GB NVMe        ~\$6/mo     (recommended minimum)" \
-            "vc2-1c-2gb:1C/2GB/55GB NVMe        ~\$12/mo" \
-            "vc2-2c-4gb:2C/4GB/80GB NVMe        ~\$24/mo"
+        show_menu "Vultr instance plans ($(cache_age_str "$PLAN_CACHE"); verify at vultr.com/pricing/):" \
+            "$CURRENT_PLAN" "${PLANS[@]}"
         PLAN="$_MENU_RESULT"
         ;;
     aws)
         [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="us-east-1"
         [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN="t3.micro"
-        show_menu "AWS regions (pricing varies by region; see aws.amazon.com/ec2/pricing/):" \
-            "$CURRENT_REGION" \
-            "us-east-1:N. Virginia - US East" \
-            "us-east-2:Ohio - US East" \
-            "us-west-1:N. California - US West" \
-            "us-west-2:Oregon - US West" \
-            "ca-central-1:Canada Central - Montreal" \
-            "eu-west-1:Ireland - EU" \
-            "eu-west-2:London - EU" \
-            "eu-central-1:Frankfurt - EU" \
-            "ap-southeast-1:Singapore - AP" \
-            "ap-southeast-2:Sydney - AP" \
-            "ap-northeast-1:Tokyo - AP" \
-            "ap-south-1:Mumbai - AP" \
-            "sa-east-1:Sao Paulo - SA"
-        REGION="$_MENU_RESULT"
-        show_menu "AWS EC2 instance types (Linux on-demand, us-east-1; verify at aws.amazon.com/ec2/pricing/):" \
-            "$CURRENT_PLAN" \
-            "t4g.micro:2C ARM/1GB    ~\$6/mo   (cheapest; Graviton ARM architecture)" \
-            "t3a.micro:2C AMD/1GB    ~\$7/mo" \
-            "t3.micro:2C Intel/1GB   ~\$8/mo   (free-tier eligible)" \
-            "t3.small:2C Intel/2GB   ~\$15/mo" \
+
+        REG_CACHE="$CACHE_DIR/aws-regions.json"
+
+        if $FORCE_REFRESH || ! cache_fresh "$REG_CACHE"; then fetch_aws_regions || true; fi
+
+        REGIONS=()
+        [[ -f "$REG_CACHE" ]] && load_cache_items REGIONS "$REG_CACHE"
+        if [[ ${#REGIONS[@]} -eq 0 ]]; then
+            REGIONS=(
+                "us-east-1:N. Virginia - US East"
+                "us-east-2:Ohio - US East"
+                "us-west-1:N. California - US West"
+                "us-west-2:Oregon - US West"
+                "ca-central-1:Canada Central - Montreal"
+                "eu-west-1:Ireland - EU"
+                "eu-west-2:London - EU"
+                "eu-central-1:Frankfurt - EU"
+                "ap-southeast-1:Singapore - AP"
+                "ap-southeast-2:Sydney - AP"
+                "ap-northeast-1:Tokyo - AP"
+                "ap-south-1:Mumbai - AP"
+                "sa-east-1:Sao Paulo - SA"
+            )
+        fi
+
+        # AWS instance types: no public pricing API without auth; use static list
+        PLANS=(
+            "t4g.micro:2C ARM/1GB    ~\$6/mo   (cheapest; Graviton ARM architecture)"
+            "t3a.micro:2C AMD/1GB    ~\$7/mo"
+            "t3.micro:2C Intel/1GB   ~\$8/mo   (free-tier eligible)"
+            "t3.small:2C Intel/2GB   ~\$15/mo"
             "t3.medium:2C Intel/4GB  ~\$30/mo"
+        )
+
+        show_menu "AWS regions ($(cache_age_str "$REG_CACHE"); pricing varies; see aws.amazon.com/ec2/pricing/):" \
+            "$CURRENT_REGION" "${REGIONS[@]}"
+        REGION="$_MENU_RESULT"
+        show_menu "AWS EC2 instance types (static approx; Linux on-demand, us-east-1; verify at aws.amazon.com/ec2/pricing/):" \
+            "$CURRENT_PLAN" "${PLANS[@]}"
         PLAN="$_MENU_RESULT"
         ;;
     azure)
         [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="eastus"
         [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN="Standard_B1s"
-        show_menu "Azure regions (pricing varies; see azure.microsoft.com/pricing/details/virtual-machines/linux/):" \
-            "$CURRENT_REGION" \
-            "eastus:East US - Virginia" \
-            "eastus2:East US 2 - Virginia" \
-            "westus2:West US 2 - Washington" \
-            "centralus:Central US - Iowa" \
-            "canadacentral:Canada Central - Toronto" \
-            "northeurope:North Europe - Ireland" \
-            "westeurope:West Europe - Netherlands" \
-            "uksouth:UK South - London" \
-            "germanywestcentral:Germany West Central - Frankfurt" \
-            "francecentral:France Central - Paris" \
-            "australiaeast:Australia East - New South Wales" \
-            "southeastasia:Southeast Asia - Singapore" \
-            "japaneast:Japan East - Tokyo" \
-            "koreacentral:Korea Central - Seoul" \
-            "centralindia:Central India - Pune" \
+
+        PLAN_CACHE="$CACHE_DIR/azure-plans.json"
+
+        if $FORCE_REFRESH || ! cache_fresh "$PLAN_CACHE"; then fetch_azure_plans || true; fi
+
+        # Azure regions: no free unauthenticated API; use static list
+        REGIONS=(
+            "eastus:East US - Virginia"
+            "eastus2:East US 2 - Virginia"
+            "westus2:West US 2 - Washington"
+            "centralus:Central US - Iowa"
+            "canadacentral:Canada Central - Toronto"
+            "northeurope:North Europe - Ireland"
+            "westeurope:West Europe - Netherlands"
+            "uksouth:UK South - London"
+            "germanywestcentral:Germany West Central - Frankfurt"
+            "francecentral:France Central - Paris"
+            "australiaeast:Australia East - New South Wales"
+            "southeastasia:Southeast Asia - Singapore"
+            "japaneast:Japan East - Tokyo"
+            "koreacentral:Korea Central - Seoul"
+            "centralindia:Central India - Pune"
             "brazilsouth:Brazil South - Sao Paulo"
+        )
+
+        PLANS=()
+        [[ -f "$PLAN_CACHE" ]] && load_cache_items PLANS "$PLAN_CACHE"
+        if [[ ${#PLANS[@]} -eq 0 ]]; then
+            PLANS=(
+                "Standard_B1ls:1C/512MB   ~\$4/mo   (not recommended: OOM risk with Forgejo+Postgres)"
+                "Standard_B1s:1C/1GB      ~\$8/mo   (recommended minimum)"
+                "Standard_B1ms:1C/2GB     ~\$15/mo"
+                "Standard_B2s:2C/4GB      ~\$30/mo"
+                "Standard_B2ms:2C/8GB     ~\$61/mo"
+            )
+        fi
+
+        show_menu "Azure regions (static; see azure.microsoft.com/pricing/details/virtual-machines/linux/):" \
+            "$CURRENT_REGION" "${REGIONS[@]}"
         REGION="$_MENU_RESULT"
-        show_menu "Azure VM sizes - B-series burstable (Linux; verify at azure.microsoft.com/pricing/details/virtual-machines/linux/):" \
-            "$CURRENT_PLAN" \
-            "Standard_B1ls:1C/512MB   ~\$4/mo   (not recommended: OOM risk with Forgejo+Postgres)" \
-            "Standard_B1s:1C/1GB      ~\$8/mo   (recommended minimum)" \
-            "Standard_B1ms:1C/2GB     ~\$15/mo" \
-            "Standard_B2s:2C/4GB      ~\$30/mo" \
-            "Standard_B2ms:2C/8GB     ~\$61/mo"
+        show_menu "Azure VM sizes - B-series burstable ($(cache_age_str "$PLAN_CACHE"); verify at azure.microsoft.com/pricing/details/virtual-machines/linux/):" \
+            "$CURRENT_PLAN" "${PLANS[@]}"
         PLAN="$_MENU_RESULT"
         ;;
 esac

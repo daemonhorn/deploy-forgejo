@@ -84,6 +84,13 @@ Idempotent. Each run:
 
 The last-used provider is saved to `.last-provider` (gitignored) so re-runs default to the same provider without prompting.
 
+Use `--refresh` to force a fresh fetch of region and plan data (normally cached for 24 hours):
+
+```
+./provision.sh --refresh
+./provision.sh --provider aws --refresh
+```
+
 Use `--debug` to run certbot against the staging CA (faster iteration; certificate will not be browser-trusted):
 
 ```
