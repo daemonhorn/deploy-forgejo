@@ -96,8 +96,14 @@ resource "azurerm_network_interface" "main" {
   }
 }
 
-resource "azurerm_network_interface_security_group_association" "main" {
-  network_interface_id      = azurerm_network_interface.main.id
+# Associate NSG at the subnet level rather than per-NIC.
+# With a per-NIC association, Terraform can destroy the NIC and NSG in parallel;
+# Azure rejects the NSG deletion if the NIC's association record hasn't cleared yet
+# (even after the NIC DELETE returns 200). The subnet association resource depends
+# on both the subnet and the NSG, so Terraform's graph guarantees it is destroyed
+# before either — the NIC has no NSG reference and is not in that ordering chain.
+resource "azurerm_subnet_network_security_group_association" "main" {
+  subnet_id                 = azurerm_subnet.main.id
   network_security_group_id = azurerm_network_security_group.main.id
 }
 
