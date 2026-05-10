@@ -41,8 +41,7 @@ Idempotent. On first run it:
 3. Exports the SSH-format CA public key to `ca.pub`
 4. Starts a local Vault server (file backend in `.vault-data/`, persists across reboots)
 5. Generates DB password and Forgejo secrets, stores them in Vault
-6. Prompts for `DOMAIN` (or VPS IP), `CERTBOT_EMAIL`, admin SSH public key, Forgejo admin username/email
-7. Writes `terraform/terraform.tfvars` from your answers
+6. Prompts for `CERTBOT_EMAIL`, admin SSH public key, Forgejo admin username/email
 
 On subsequent runs it detects the existing Yubikey key and Vault state and skips re-generation.
 
@@ -58,11 +57,13 @@ Idempotent. Each run:
 
 1. Starts and unseals Vault if needed
 2. Reads all secrets from Vault
-3. Runs `terraform apply` (creates or reconciles the Vultr instance, firewall, SSH key)
-4. Waits for SSH to become available
-5. Renders config templates (`app.ini`, `.env`, `nginx.conf`) with secrets via `envsubst`
-6. SCPs all files to the VPS
-7. Runs `deploy.sh` on the VPS via SSH
+3. Prompts for cloud provider, then shows numbered menus for region and instance size (with approximate pricing); defaults to the previous run's values
+4. Writes `terraform.tfvars` for the selected provider
+5. Runs `terraform apply` (creates or reconciles the instance, firewall, SSH key)
+6. Waits for SSH to become available
+7. Renders config templates (`app.ini`, `.env`, `nginx.conf`) with secrets via `envsubst`
+8. SCPs all files to the VPS
+9. Runs `deploy.sh` on the VPS via SSH
 
 `deploy.sh` (runs on VPS as root):
 - Installs Docker, creates the `git` system user
@@ -278,15 +279,15 @@ Users who supply their own public key never expose their private key — only th
 
 ### Vultr (default)
 
-Config in `terraform/terraform.tfvars`. Credentials in `vultr_api_key` file.
+Credentials in `vultr_api_key` file. Region and plan are selected interactively during `provision.sh` from a numbered menu with pricing.
 
-Default region: `ewr` (New Jersey). Default plan: `vc2-1c-0.5gb`.
+Default region: `ewr` (New Jersey). Default plan: `vc2-1c-1gb` (1 vCPU, 1 GB RAM — recommended minimum for Forgejo+Postgres).
 
 ### AWS
 
-Config in `terraform/aws/terraform.tfvars` (created automatically from the example on first run). Credentials in `aws_access_key` and `aws_secret_access_key` files — these map directly to `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+Credentials in `aws_access_key` and `aws_secret_access_key` files — these map directly to `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Region and plan are selected interactively during `provision.sh` from a numbered menu with approximate pricing.
 
-Default region: `us-east-1` (N. Virginia). Default plan: `t3.micro` (2 vCPU, 1 GB RAM).
+Default region: `us-east-1` (N. Virginia). Default plan: `t3.micro` (2 vCPU, 1 GB RAM, ~$8/mo, free-tier eligible).
 
 The Debian 12 AMI is resolved at apply time via a data source querying the official Debian AWS account (`136693071363`), so it always uses the latest published image.
 
@@ -294,7 +295,7 @@ AWS Debian instances default to the `admin` user. The instance `user_data` scrip
 
 ### Azure
 
-Config in `terraform/azure/terraform.tfvars` (created automatically from the example on first run). Credentials in `azure_credentials` (JSON, gitignored).
+Credentials in `azure_credentials` (JSON, gitignored). Region and plan are selected interactively during `provision.sh` from a numbered menu with approximate pricing.
 
 Default region: `eastus` (East US). Default plan: `Standard_B1s` (1 vCPU, 1 GB RAM, ~$7.59/month) — the smallest Azure VM size that reliably runs Forgejo + PostgreSQL + nginx. `Standard_B1ls` (0.5 GB RAM, ~$3.80/month) exists but risks OOM under normal load.
 

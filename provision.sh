@@ -16,6 +16,49 @@ info()  { echo -e "${GREEN}[provision]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[provision]${NC} $*"; }
 error() { echo -e "${RED}[provision]${NC} $*" >&2; exit 1; }
 
+# ── Region / plan helpers ─────────────────────────────────────────────────────
+
+# Read a field from a terraform.tfvars file (returns empty string if file/field absent)
+tfvars_get() {
+    local file="$1" var="$2"
+    [[ -f "$file" ]] || return 0
+    grep -E "^\s*${var}\s*=" "$file" 2>/dev/null \
+        | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/' | tr -d '[:space:]'
+}
+
+# Interactive numbered menu. Items are "code:description" strings.
+# Writes the selected code into global _MENU_RESULT (avoids subshell capture).
+_MENU_RESULT=""
+show_menu() {
+    local header="$1" default="$2"; shift 2
+    local -a items=("$@")
+    local n="${#items[@]}" i code desc mark _sel _item
+    echo
+    info "$header"
+    for ((i=0; i<n; i++)); do
+        code="${items[$i]%%:*}"
+        desc="${items[$i]#*:}"
+        mark=""
+        [[ "$code" == "$default" ]] && mark=" [default]"
+        printf "    %2d) %-24s %s%s\n" "$((i+1))" "$code" "$desc" "$mark"
+    done
+    echo
+    _MENU_RESULT=""
+    while [[ -z "$_MENU_RESULT" ]]; do
+        read -rp "    Select [${default}]: " _sel
+        _sel="${_sel:-$default}"
+        if [[ "$_sel" =~ ^[0-9]+$ ]] && (( _sel >= 1 && _sel <= n )); then
+            _MENU_RESULT="${items[$((_sel-1))]%%:*}"
+        else
+            for _item in "${items[@]}"; do
+                [[ "${_item%%:*}" == "$_sel" ]] && { _MENU_RESULT="$_sel"; break; }
+            done
+        fi
+        [[ -n "$_MENU_RESULT" ]] \
+            || warn "Invalid selection '${_sel}'. Enter a number (1-${n}) or a valid code."
+    done
+}
+
 # ── CLI arguments ─────────────────────────────────────────────────────────────
 CERTBOT_STAGING=""
 PROVIDER=""
@@ -165,6 +208,123 @@ PY
         ;;
 esac
 
+# ── Region & plan selection ───────────────────────────────────────────────────
+CURRENT_REGION="$(tfvars_get "${TF_DIR}/terraform.tfvars" region)"
+CURRENT_PLAN="$(tfvars_get "${TF_DIR}/terraform.tfvars" plan)"
+
+case "$PROVIDER" in
+    vultr)
+        [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="ewr"
+        [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN="vc2-1c-1gb"
+        show_menu "Vultr regions (verify at vultr.com/features/datacenter-locations/):" \
+            "$CURRENT_REGION" \
+            "ewr:Piscataway, NJ - US East" \
+            "lax:Los Angeles, CA - US West" \
+            "ord:Chicago, IL - US Central" \
+            "dfw:Dallas, TX - US South" \
+            "sea:Seattle, WA - US West" \
+            "mia:Miami, FL - US South" \
+            "atl:Atlanta, GA - US South" \
+            "fra:Frankfurt - EU" \
+            "ams:Amsterdam - EU" \
+            "lhr:London - EU" \
+            "syd:Sydney - AU" \
+            "sin:Singapore - AP" \
+            "nrt:Tokyo - AP" \
+            "icn:Seoul - AP" \
+            "blr:Bangalore - AP"
+        REGION="$_MENU_RESULT"
+        show_menu "Vultr instance plans (approx; verify current pricing at vultr.com/pricing/):" \
+            "$CURRENT_PLAN" \
+            "vc2-1c-0.5gb:1C/512MB/10GB NVMe   ~\$2.50/mo  (not recommended: too small for Forgejo+Postgres)" \
+            "vc2-1c-1gb:1C/1GB/25GB NVMe        ~\$6/mo     (recommended minimum)" \
+            "vc2-1c-2gb:1C/2GB/55GB NVMe        ~\$12/mo" \
+            "vc2-2c-4gb:2C/4GB/80GB NVMe        ~\$24/mo"
+        PLAN="$_MENU_RESULT"
+        ;;
+    aws)
+        [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="us-east-1"
+        [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN="t3.micro"
+        show_menu "AWS regions (pricing varies by region; see aws.amazon.com/ec2/pricing/):" \
+            "$CURRENT_REGION" \
+            "us-east-1:N. Virginia - US East" \
+            "us-east-2:Ohio - US East" \
+            "us-west-1:N. California - US West" \
+            "us-west-2:Oregon - US West" \
+            "ca-central-1:Canada Central - Montreal" \
+            "eu-west-1:Ireland - EU" \
+            "eu-west-2:London - EU" \
+            "eu-central-1:Frankfurt - EU" \
+            "ap-southeast-1:Singapore - AP" \
+            "ap-southeast-2:Sydney - AP" \
+            "ap-northeast-1:Tokyo - AP" \
+            "ap-south-1:Mumbai - AP" \
+            "sa-east-1:Sao Paulo - SA"
+        REGION="$_MENU_RESULT"
+        show_menu "AWS EC2 instance types (Linux on-demand, us-east-1; verify at aws.amazon.com/ec2/pricing/):" \
+            "$CURRENT_PLAN" \
+            "t4g.micro:2C ARM/1GB    ~\$6/mo   (cheapest; Graviton ARM architecture)" \
+            "t3a.micro:2C AMD/1GB    ~\$7/mo" \
+            "t3.micro:2C Intel/1GB   ~\$8/mo   (free-tier eligible)" \
+            "t3.small:2C Intel/2GB   ~\$15/mo" \
+            "t3.medium:2C Intel/4GB  ~\$30/mo"
+        PLAN="$_MENU_RESULT"
+        ;;
+    azure)
+        [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="eastus"
+        [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN="Standard_B1s"
+        show_menu "Azure regions (pricing varies; see azure.microsoft.com/pricing/details/virtual-machines/linux/):" \
+            "$CURRENT_REGION" \
+            "eastus:East US - Virginia" \
+            "eastus2:East US 2 - Virginia" \
+            "westus2:West US 2 - Washington" \
+            "centralus:Central US - Iowa" \
+            "canadacentral:Canada Central - Toronto" \
+            "northeurope:North Europe - Ireland" \
+            "westeurope:West Europe - Netherlands" \
+            "uksouth:UK South - London" \
+            "germanywestcentral:Germany West Central - Frankfurt" \
+            "francecentral:France Central - Paris" \
+            "australiaeast:Australia East - New South Wales" \
+            "southeastasia:Southeast Asia - Singapore" \
+            "japaneast:Japan East - Tokyo" \
+            "koreacentral:Korea Central - Seoul" \
+            "centralindia:Central India - Pune" \
+            "brazilsouth:Brazil South - Sao Paulo"
+        REGION="$_MENU_RESULT"
+        show_menu "Azure VM sizes - B-series burstable (Linux; verify at azure.microsoft.com/pricing/details/virtual-machines/linux/):" \
+            "$CURRENT_PLAN" \
+            "Standard_B1ls:1C/512MB   ~\$4/mo   (not recommended: OOM risk with Forgejo+Postgres)" \
+            "Standard_B1s:1C/1GB      ~\$8/mo   (recommended minimum)" \
+            "Standard_B1ms:1C/2GB     ~\$15/mo" \
+            "Standard_B2s:2C/4GB      ~\$30/mo" \
+            "Standard_B2ms:2C/8GB     ~\$61/mo"
+        PLAN="$_MENU_RESULT"
+        ;;
+esac
+
+info "Selected: region=${REGION}  plan=${PLAN}"
+
+# Write provider-specific terraform.tfvars (always; overwrites previous values)
+case "$PROVIDER" in
+    vultr)
+        cat > "${TF_DIR}/terraform.tfvars" <<EOF
+provider_name = "vultr"
+region        = "${REGION}"
+plan          = "${PLAN}"
+hostname      = "forgejo"
+EOF
+        ;;
+    aws|azure)
+        cat > "${TF_DIR}/terraform.tfvars" <<EOF
+region   = "${REGION}"
+plan     = "${PLAN}"
+hostname = "forgejo"
+EOF
+        ;;
+esac
+info "terraform.tfvars written (${TF_DIR}/terraform.tfvars)."
+
 # ── SSH key for connecting to VPS ────────────────────────────────────────────
 SSH_KEY="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
 [ -f "$SSH_KEY" ] || error "SSH key not found: $SSH_KEY. Set SSH_KEY_PATH to override."
@@ -172,12 +332,6 @@ SSH_KEY="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
 # ── Terraform ─────────────────────────────────────────────────────────────────
 info "Running Terraform ($PROVIDER)..."
 cd "$TF_DIR"
-
-# Create tfvars for AWS if not yet present (Vultr's is written by setup.sh)
-if [[ "$PROVIDER" == "aws" && ! -f terraform.tfvars ]]; then
-    info "Creating terraform/aws/terraform.tfvars with defaults..."
-    cp terraform.tfvars.example terraform.tfvars
-fi
 
 terraform init -upgrade -input=false
 terraform apply -auto-approve -input=false

@@ -10,12 +10,12 @@ Automates deployment of a [Forgejo](https://forgejo.org/) container instance on 
 
 **First time only:**
 ```
-./setup.sh          # Yubikey PIV key gen → Vault init → store secrets → write terraform.tfvars
+./setup.sh          # Yubikey PIV key gen → Vault init → store secrets (certbot email, SSH key, admin user)
 ```
 
 **Deploy / reprovision:**
 ```
-./provision.sh      # Vault → terraform apply → wait SSH → scp files → deploy.sh on VPS
+./provision.sh      # Vault → prompt provider/region/plan (menus) → write tfvars → terraform apply → deploy.sh on VPS
 ```
 
 **Issue SSH cert to a user:**
