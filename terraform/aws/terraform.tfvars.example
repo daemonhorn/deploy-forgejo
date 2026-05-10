@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values.
+# admin_ssh_public_key is supplied via TF_VAR_admin_ssh_public_key by provision.sh
+# (read from Vault) — do NOT set it here.
+
+region   = "us-east-1"   # N. Virginia; see: docs.aws.amazon.com/general/latest/gr/rande.html
+plan     = "t3.micro"    # 2 vCPU, 1 GB RAM; see: aws.amazon.com/ec2/instance-types/
+hostname = "forgejo"

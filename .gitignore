@@ -1,5 +1,7 @@
 # Secrets and credentials
 vultr_api_key
+aws_access_key
+aws_secret_access_key
 *.tfvars
 !*.tfvars.example
 
@@ -18,6 +20,11 @@ ca_public.pem
 *.tfstate.backup
 .terraform/
 .terraform.lock.hcl
+terraform/aws/.terraform/
+terraform/aws/.terraform.lock.hcl
+
+# Provider selection state
+.last-provider
 
 # Deploy artifacts
 known_hosts.deploy

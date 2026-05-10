@@ -22,7 +22,10 @@ Install on the local machine before running `setup.sh`:
 | `envsubst` | `apt install gettext-base` |
 | `openssl`, `ssh-keygen`, `ssh`, `scp` | standard packages |
 
-You also need a Vultr API key. Save it to a file named `vultr_api_key` in this directory (gitignored).
+You also need cloud provider credentials:
+
+- **Vultr**: save your API key to a file named `vultr_api_key` in this directory (gitignored)
+- **AWS**: save your access key ID to `aws_access_key` and secret to `aws_secret_access_key` (both gitignored)
 
 ## First-time setup
 
@@ -68,10 +71,21 @@ Idempotent. Each run:
 - Configures a dedicated sshd on port 2222 for Git-over-SSH
 - Creates the Forgejo admin user and prints the one-time password
 
+**Provider selection** — pass `--provider` or be prompted (defaults to last used):
+
+```
+./provision.sh --provider vultr
+./provision.sh --provider aws
+./provision.sh          # prompts: "Cloud provider (vultr/aws) [vultr]:"
+```
+
+The last-used provider is saved to `.last-provider` (gitignored) so re-runs default to the same provider without prompting.
+
 Use `--debug` to run certbot against the staging CA (faster iteration; certificate will not be browser-trusted):
 
 ```
 ./provision.sh --debug
+./provision.sh --provider aws --debug
 ```
 
 ## Adding a user
@@ -161,17 +175,24 @@ Port 2222 runs a dedicated sshd instance (`sshd-forgejo.service`) configured wit
 
 ```
 setup.sh                        # First run: Yubikey + Vault init
-provision.sh                    # Deploy / reprovision
+provision.sh                    # Deploy / reprovision (--provider vultr|aws)
 deploy.sh                       # Runs on VPS via SSH
-sign-user-key.sh                # Issue SSH cert for a user
+sign-user-key.sh                # Issue SSH cert for a user (single or batch)
 vault.hcl                       # Vault server config (file backend)
 ca.pub                          # SSH CA public key (committed; deployed to VPS)
 terraform/
-  main.tf                       # Selects provider module via var.provider_name
+  main.tf                       # Vultr Terraform root
   variables.tf
   outputs.tf
-  terraform.tfvars.example      # Copy to terraform.tfvars and fill in
-  modules/providers/vultr/      # Vultr instance, firewall, SSH key resources
+  terraform.tfvars.example
+  aws/                          # AWS Terraform root
+    main.tf
+    variables.tf
+    outputs.tf
+    terraform.tfvars.example
+  modules/providers/
+    vultr/                      # Vultr instance, firewall, SSH key
+    aws/                        # AWS EC2 instance, security group, key pair
 files/
   docker-compose.yml            # Forgejo, PostgreSQL, nginx, certbot
   sshd_forgejo.conf             # sshd config for port 2222
@@ -252,14 +273,32 @@ When `sign-user-key.sh --batch` auto-generates a keypair (no key column in the C
 
 Users who supply their own public key never expose their private key — only the cert needs to be returned to them.
 
-## Adding a cloud provider
+## Cloud providers
 
-Create `terraform/modules/providers/<name>/` with the same interface as `vultr/`:
+### Vultr (default)
+
+Config in `terraform/terraform.tfvars`. Credentials in `vultr_api_key` file.
+
+Default region: `ewr` (New Jersey). Default plan: `vc2-1c-0.5gb`.
+
+### AWS
+
+Config in `terraform/aws/terraform.tfvars` (created automatically from the example on first run). Credentials in `aws_access_key` and `aws_secret_access_key` files — these map directly to `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+
+Default region: `us-east-1` (N. Virginia). Default plan: `t3.micro` (2 vCPU, 1 GB RAM).
+
+The Debian 12 AMI is resolved at apply time via a data source querying the official Debian AWS account (`136693071363`), so it always uses the latest published image.
+
+AWS Debian instances default to the `admin` user. The instance `user_data` script copies `admin`'s `authorized_keys` to `root` and enables `PermitRootLogin prohibit-password`, so `provision.sh` can SSH as root consistently across providers.
+
+### Adding another provider
+
+Create `terraform/modules/providers/<name>/` with the same interface as `vultr/` and `aws/`:
 
 - **Inputs**: `ssh_public_key`, `region`, `plan`, `hostname`, `firewall_ports`
 - **Outputs**: `public_ipv4`, `ssh_user`, `instance_id`
 
-Set `provider_name = "<name>"` in `terraform.tfvars` and supply the provider's API key via a `TF_VAR_` environment variable. No other files need to change.
+Create a corresponding `terraform/<name>/` root directory (`main.tf`, `variables.tf`, `outputs.tf`, `terraform.tfvars.example`) following the pattern of `terraform/aws/`. Add the provider name to the case statement in `provision.sh` (credentials block and `TF_DIR` assignment). No other files need to change.
 
 ## Verification checklist
 
