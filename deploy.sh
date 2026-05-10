@@ -2,7 +2,8 @@
 # deploy.sh — Runs on the VPS (as root) to install and start all services.
 #
 # Invoked by provision.sh via SSH. Required env vars (injected by provision.sh):
-#   DOMAIN, CERTBOT_EMAIL, FORGEJO_ADMIN_USER, FORGEJO_ADMIN_EMAIL
+#   DOMAIN, CERTBOT_EMAIL, FORGEJO_ADMIN_USER, FORGEJO_ADMIN_EMAIL,
+#   ADMIN_SSH_PUBLIC_KEY
 #
 # Idempotent: each step checks before acting, safe to re-run.
 set -euo pipefail
@@ -14,6 +15,64 @@ error() { echo -e "${RED}[deploy]${NC} $*" >&2; exit 1; }
 
 WORKDIR="/opt/forgejo"
 cd "$WORKDIR"
+
+# ── 0a. Update all system packages ───────────────────────────────────────────
+info "Updating system packages (this may take a minute on first run)..."
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold"
+info "System packages up to date."
+
+# ── 0b. Unattended upgrades — daily at 08:00 UTC, including kernels ───────────
+if [ ! -f /etc/apt/apt.conf.d/50unattended-upgrades ] || \
+   ! grep -q 'Forgejo-deploy' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null; then
+    info "Configuring unattended-upgrades..."
+    apt-get install -y -qq unattended-upgrades
+
+    DISTRO_CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+
+    cat > /etc/apt/apt.conf.d/50unattended-upgrades << EOF
+// Forgejo-deploy — managed by deploy.sh
+Unattended-Upgrade::Origins-Pattern {
+    "origin=Debian,codename=${DISTRO_CODENAME},label=Debian";
+    "origin=Debian,codename=${DISTRO_CODENAME},label=Debian-Security";
+    "origin=Debian,codename=${DISTRO_CODENAME}-security,label=Debian-Security";
+    "origin=Debian,codename=${DISTRO_CODENAME}-updates";
+};
+
+Unattended-Upgrade::Package-Blacklist {
+};
+
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "08:00";
+Unattended-Upgrade::MinimalSteps "true";
+EOF
+
+    cat > /etc/apt/apt.conf.d/20auto-upgrades << 'APTEOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+APTEOF
+
+    # Override apt-daily-upgrade.timer to fire at 08:00 UTC exactly
+    mkdir -p /etc/systemd/system/apt-daily-upgrade.timer.d
+    cat > /etc/systemd/system/apt-daily-upgrade.timer.d/override.conf << 'TIMEREOF'
+[Timer]
+OnCalendar=
+OnCalendar=*-*-* 08:00 UTC
+RandomizedDelaySec=0
+Persistent=true
+TIMEREOF
+
+    systemctl daemon-reload
+    systemctl enable --now apt-daily-upgrade.timer
+    info "Unattended upgrades configured (daily at 08:00 UTC, auto-reboot enabled)."
+fi
 
 # ── 0. Configure host firewall (UFW) ─────────────────────────────────────────
 # Docker bypasses UFW for container-mapped ports (80, 443), but host services
@@ -48,6 +107,42 @@ else
     info "Docker already installed, skipping."
 fi
 
+# ── 1b. Kernel lockdown (integrity mode) ─────────────────────────────────────
+# integrity mode prevents writing to kernel memory (driver signing, kprobes, etc.)
+# confidentiality mode is too restrictive for ops (breaks kexec, hibernate).
+info "Enabling kernel lockdown (integrity mode)..."
+
+LOCKDOWN_SYS="/sys/kernel/security/lockdown"
+_lockdown_runtime_active=false
+if [ -f "$LOCKDOWN_SYS" ]; then
+    _cur="$(cat "$LOCKDOWN_SYS" 2>/dev/null || true)"
+    if echo "$_cur" | grep -qE '\[(integrity|confidentiality)\]'; then
+        info "Kernel lockdown already active: $(echo "$_cur" | tr -d '\n')"
+        _lockdown_runtime_active=true
+    elif [ -w "$LOCKDOWN_SYS" ]; then
+        echo integrity > "$LOCKDOWN_SYS" \
+            && { info "Kernel lockdown set to integrity mode (runtime)."; _lockdown_runtime_active=true; } \
+            || warn "Runtime lockdown write failed — will take effect after reboot."
+    else
+        warn "Lockdown sysfs not writable — will take effect after reboot."
+    fi
+else
+    warn "Lockdown sysfs not present — kernel may lack CONFIG_SECURITY_LOCKDOWN_LSM."
+fi
+
+# Persist via GRUB cmdline for reboots (and for kernels without runtime sysfs)
+if [ -f /etc/default/grub ] && ! grep -q 'lockdown=integrity' /etc/default/grub; then
+    sed -i -E 's/^(GRUB_CMDLINE_LINUX_DEFAULT=")(.*)(")$/\1\2 lockdown=integrity\3/' \
+        /etc/default/grub
+    update-grub 2>/dev/null || update-grub2 2>/dev/null || true
+    info "lockdown=integrity added to GRUB kernel cmdline (persistent after reboot)."
+elif [ -f /etc/default/grub ]; then
+    info "lockdown=integrity already in GRUB cmdline."
+else
+    warn "GRUB config not found — kernel lockdown not persisted to bootloader."
+fi
+$_lockdown_runtime_active || warn "Kernel lockdown will be fully active after the next reboot."
+
 # ── 2. Create system git user ─────────────────────────────────────────────────
 if ! id git &>/dev/null; then
     info "Creating git system user..."
@@ -59,6 +154,44 @@ usermod -aG docker git 2>/dev/null || true
 # rejects via allowed_user() even when UsePAM no. '*' means no password
 # but account is not locked, so key/cert auth proceeds normally.
 usermod -p '*' git
+
+# ── 2b. Deploy admin user ─────────────────────────────────────────────────────
+# Replaces root for SSH access. docker group grants container exec rights needed
+# by sign-user-key.sh to fetch Forgejo admin tokens; sudo covers general admin.
+# NOTE: docker group membership is effectively root-equivalent — this is accepted
+# for an administrative account on a single-purpose server.
+info "Setting up deploy admin user..."
+DEPLOY_USER="deploy"
+
+if ! id "$DEPLOY_USER" &>/dev/null; then
+    useradd -m -s /bin/bash "$DEPLOY_USER"
+    info "Created user $DEPLOY_USER."
+fi
+usermod -aG docker,sudo "$DEPLOY_USER" 2>/dev/null || true
+# Lock password (key-only login; '!' = locked, cannot log in with any password)
+usermod -p '!' "$DEPLOY_USER"
+
+# Install admin SSH public key (injected by provision.sh from Vault)
+if [ -n "${ADMIN_SSH_PUBLIC_KEY:-}" ]; then
+    install -d -o "$DEPLOY_USER" -g "$DEPLOY_USER" -m 700 "/home/$DEPLOY_USER/.ssh"
+    echo "$ADMIN_SSH_PUBLIC_KEY" > "/home/$DEPLOY_USER/.ssh/authorized_keys"
+    chown "$DEPLOY_USER:$DEPLOY_USER" "/home/$DEPLOY_USER/.ssh/authorized_keys"
+    chmod 600 "/home/$DEPLOY_USER/.ssh/authorized_keys"
+    info "Admin SSH key installed for $DEPLOY_USER."
+else
+    warn "ADMIN_SSH_PUBLIC_KEY not set — $DEPLOY_USER has no SSH keys; set it in Vault."
+fi
+
+# Passwordless sudo so deploy user can re-run deploy.sh (sudo bash deploy.sh)
+cat > /etc/sudoers.d/deploy-admin << 'SUDOEOF'
+deploy ALL=(ALL) NOPASSWD: ALL
+SUDOEOF
+chmod 440 /etc/sudoers.d/deploy-admin
+
+# Allow deploy group to write /opt/forgejo so provision.sh scp works on re-runs
+chown root:deploy "$WORKDIR"
+chmod 775 "$WORKDIR"
+info "Deploy admin user configured."
 
 # ── 3. Create directory structure ─────────────────────────────────────────────
 info "Creating directories..."
@@ -331,8 +464,123 @@ EOF
     systemctl enable --now certbot-renew.timer
 fi
 
+# ── 14. Docker image update timer ────────────────────────────────────────────
+# Pulls latest image digests daily and recreates any container whose image changed.
+# Runs at 09:00 UTC (1 hour after unattended-upgrades reboot window) to avoid
+# restarting containers while a kernel reboot may be in progress.
+if [ ! -f /etc/systemd/system/docker-pull.timer ]; then
+    info "Installing Docker image update timer..."
+    cat > /etc/systemd/system/docker-pull.service << SVCEOF
+[Unit]
+Description=Pull latest Docker images and recreate changed containers
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=$WORKDIR
+ExecStart=/usr/bin/docker compose -f $WORKDIR/docker-compose.yml \\
+    --env-file $WORKDIR/.env --project-directory $WORKDIR \\
+    pull --quiet
+ExecStartPost=/usr/bin/docker compose -f $WORKDIR/docker-compose.yml \\
+    --env-file $WORKDIR/.env --project-directory $WORKDIR \\
+    up -d --remove-orphans
+SVCEOF
+
+    cat > /etc/systemd/system/docker-pull.timer << 'TIMEREOF'
+[Unit]
+Description=Daily Docker image update check
+
+[Timer]
+OnCalendar=*-*-* 09:00 UTC
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMEREOF
+
+    systemctl daemon-reload
+    systemctl enable --now docker-pull.timer
+    info "Docker image update timer installed (daily at 09:00 UTC)."
+fi
+
+# ── 15. Harden main sshd — disable root login (runs LAST) ────────────────────
+# Runs at the very end so root access is available throughout deploy.
+# After this step, only the 'deploy' user can SSH on port 22.
+info "Hardening main SSH daemon (disabling root login)..."
+
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/99-hardening.conf << 'SSHDEOF'
+# Forgejo deployment hardening — managed by deploy.sh
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+AllowUsers deploy
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+MaxAuthTries 3
+LoginGraceTime 30
+SSHDEOF
+
+# Validate before reload — a broken config would lock everyone out
+sshd -t || error "sshd config test failed — check /etc/ssh/sshd_config.d/99-hardening.conf"
+
+# reload preserves existing SSH sessions (unlike restart)
+systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null \
+    || kill -HUP "$(pgrep -o sshd)" 2>/dev/null || true
+
+info "SSH hardened: root login disabled, only 'deploy' user allowed on port 22."
+warn "Verify: ssh -p 22 deploy@${DOMAIN} before closing this session."
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo
 info "Deploy complete."
 echo "  Forgejo URL  : https://${DOMAIN}"
 echo "  Git SSH port : 2222"
+echo "  Admin SSH    : ssh deploy@${DOMAIN}"
+echo
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+warn "Additional hardening recommendations:"
+echo
+echo "  1. FAIL2BAN  Blocks SSH brute-force attempts:"
+echo "       apt install fail2ban"
+echo "       configure /etc/fail2ban/jail.local with [sshd] ban settings"
+echo
+echo "  2. AUDITD    Syscall-level audit log for intrusion forensics:"
+echo "       apt install auditd"
+echo "       auditctl -a always,exit -F arch=b64 -S execve -k exec_log"
+echo
+echo "  3. DOCKER SOCKET PROXY  Limit container access to the Docker socket"
+echo "       using Tecnativa/docker-socket-proxy rather than raw /var/run/docker.sock"
+echo
+echo "  4. SSH PORT  Move admin SSH to a non-standard port (e.g. 2223):"
+echo "       update Port in /etc/ssh/sshd_config.d/99-hardening.conf"
+echo "       ufw allow 2223/tcp; ufw delete allow 22/tcp"
+echo "       update provision.sh SSH_OPTS and cloud firewall group"
+echo
+echo "  5. WAF / CDN  Place Forgejo behind Cloudflare Tunnel or a WAF"
+echo "       to filter malicious HTTP before it reaches nginx"
+echo
+echo "  6. FILE INTEGRITY  AIDE detects unauthorized file changes:"
+echo "       apt install aide; aideinit"
+echo "       run 'aide --check' periodically (schedule via systemd timer)"
+echo
+echo "  7. ROOTLESS DOCKER  Eliminate the docker=root equivalence:"
+echo "       https://docs.docker.com/engine/security/rootless/"
+echo "       Requires updated docker-compose.yml volume paths"
+echo
+echo "  8. NGINX TLS HARDENING  Enforce TLS 1.2+, HSTS, and OCSP stapling"
+echo "       in nginx.conf.tmpl; test with https://www.ssllabs.com/ssltest/"
+echo
+echo "  9. IPv6  Disable if unused to reduce attack surface:"
+echo "       echo 'net.ipv6.conf.all.disable_ipv6=1' >> /etc/sysctl.d/99-local.conf"
+echo "       sysctl --system"
+echo
+echo " 10. SECRETS ROTATION  Rotate Vault unseal key after any suspected"
+echo "       compromise. CA rotation invalidates all issued user certificates."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

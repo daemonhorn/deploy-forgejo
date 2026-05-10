@@ -170,14 +170,26 @@ SSH_OPTS="-i $SSH_KEY -o UserKnownHostsFile=./known_hosts.deploy -o StrictHostKe
 
 # On AWS, user_data configures root access after sshd is already listening.
 # Retry the actual login until it succeeds (up to 3 extra minutes).
-info "Verifying SSH login as $SSH_USER..."
+# On re-runs after hardening, root login is disabled — fall back to deploy user.
+info "Verifying SSH login as $SSH_USER (will retry as 'deploy' if root is disabled)..."
 ATTEMPTS=0
 until ssh $SSH_OPTS -o ConnectTimeout=10 -o BatchMode=yes "${SSH_USER}@${IP}" true 2>/dev/null; do
     ATTEMPTS=$((ATTEMPTS + 1))
-    [ "$ATTEMPTS" -lt 18 ] || error "Cannot log in as ${SSH_USER}@${IP} after 3 minutes"
+    [ "$ATTEMPTS" -lt 18 ] || break
     sleep 10
 done
-info "SSH login confirmed."
+
+if ! ssh $SSH_OPTS -o ConnectTimeout=5 -o BatchMode=yes "${SSH_USER}@${IP}" true 2>/dev/null; then
+    info "Login as $SSH_USER failed; trying deploy user (post-hardening re-run)..."
+    ATTEMPTS=0
+    until ssh $SSH_OPTS -o ConnectTimeout=10 -o BatchMode=yes "deploy@${IP}" true 2>/dev/null; do
+        ATTEMPTS=$((ATTEMPTS + 1))
+        [ "$ATTEMPTS" -lt 6 ] || error "Cannot log in as ${SSH_USER} or deploy@${IP} — check SSH key and firewall"
+        sleep 5
+    done
+    SSH_USER="deploy"
+fi
+info "SSH login confirmed as $SSH_USER."
 
 # ── Render templates ──────────────────────────────────────────────────────────
 info "Rendering configuration templates..."
@@ -197,33 +209,60 @@ envsubst '${DB_PASSWORD} ${DB_USER} ${DB_NAME}' \
     < files/templates/.env.tmpl > "$TMPDIR/.env"
 
 # ── Copy files to VPS ─────────────────────────────────────────────────────────
-info "Copying files to VPS..."
+info "Copying files to VPS (as $SSH_USER)..."
 # shellcheck disable=SC2086
-ssh $SSH_OPTS "${SSH_USER}@${IP}" "mkdir -p /opt/forgejo"
 
-scp $SSH_OPTS \
-    "$TMPDIR/nginx-http.conf" \
-    "$TMPDIR/nginx.conf" \
-    "$TMPDIR/app.ini" \
-    "$TMPDIR/.env" \
-    files/docker-compose.yml \
-    files/certbot-renew.sh \
-    files/forgejo-keys.sh \
-    files/forgejo-cert-extract.py \
-    files/sshd_forgejo.conf \
-    ca.pub \
-    "${SSH_USER}@${IP}:/opt/forgejo/"
-
-scp $SSH_OPTS deploy.sh "${SSH_USER}@${IP}:/opt/forgejo/deploy.sh"
+if [[ "$SSH_USER" == "root" ]]; then
+    # First run: SSH as root, scp directly to /opt/forgejo
+    ssh $SSH_OPTS "${SSH_USER}@${IP}" "mkdir -p /opt/forgejo"
+    scp $SSH_OPTS \
+        "$TMPDIR/nginx-http.conf" \
+        "$TMPDIR/nginx.conf" \
+        "$TMPDIR/app.ini" \
+        "$TMPDIR/.env" \
+        files/docker-compose.yml \
+        files/certbot-renew.sh \
+        files/forgejo-keys.sh \
+        files/forgejo-cert-extract.py \
+        files/sshd_forgejo.conf \
+        ca.pub \
+        "${SSH_USER}@${IP}:/opt/forgejo/"
+    scp $SSH_OPTS deploy.sh "${SSH_USER}@${IP}:/opt/forgejo/deploy.sh"
+else
+    # Re-run after hardening: SSH as deploy; /opt/forgejo is chown root:deploy g+w
+    # Stage to tmp first, then sudo-move into place
+    STAGE_DIR="$(ssh $SSH_OPTS "deploy@${IP}" "mktemp -d")"
+    trap 'ssh '"$SSH_OPTS"' "deploy@'"$IP"'" "rm -rf '"$STAGE_DIR"'" 2>/dev/null; rm -rf "$TMPDIR"' EXIT
+    scp $SSH_OPTS \
+        "$TMPDIR/nginx-http.conf" \
+        "$TMPDIR/nginx.conf" \
+        "$TMPDIR/app.ini" \
+        "$TMPDIR/.env" \
+        files/docker-compose.yml \
+        files/certbot-renew.sh \
+        files/forgejo-keys.sh \
+        files/forgejo-cert-extract.py \
+        files/sshd_forgejo.conf \
+        ca.pub \
+        deploy.sh \
+        "deploy@${IP}:${STAGE_DIR}/"
+    ssh $SSH_OPTS "deploy@${IP}" \
+        "sudo mv ${STAGE_DIR}/* /opt/forgejo/ && sudo rm -rf ${STAGE_DIR}"
+fi
 
 # ── Run deploy.sh on VPS ──────────────────────────────────────────────────────
-info "Running deploy.sh on VPS..."
+info "Running deploy.sh on VPS as $SSH_USER..."
+# On re-runs as deploy user, sudo env passes the environment variables through.
+SUDO_PREFIX=""
+[[ "$SSH_USER" != "root" ]] && SUDO_PREFIX="sudo env"
+# shellcheck disable=SC2086
 ssh $SSH_OPTS "${SSH_USER}@${IP}" \
-    "DOMAIN='${DOMAIN}' \
+    "${SUDO_PREFIX} DOMAIN='${DOMAIN}' \
      CERTBOT_EMAIL='${CERTBOT_EMAIL}' \
      CERTBOT_STAGING='${CERTBOT_STAGING}' \
      FORGEJO_ADMIN_USER='${FORGEJO_ADMIN_USER}' \
      FORGEJO_ADMIN_EMAIL='${FORGEJO_ADMIN_EMAIL}' \
+     ADMIN_SSH_PUBLIC_KEY='${ADMIN_SSH_PUBLIC_KEY}' \
      bash /opt/forgejo/deploy.sh"
 
 # ── Verify HTTPS endpoint ─────────────────────────────────────────────────────
@@ -243,6 +282,8 @@ fi
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 info "Forgejo is live at https://${IP}  [${PROVIDER}]"
+echo
+echo "  Admin SSH : ssh deploy@${IP}   (root login disabled after hardening)"
 echo
 echo "  To add a user:"
 echo "    ./sign-user-key.sh <username> /path/to/user_key.pub"
