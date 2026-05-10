@@ -270,62 +270,70 @@ fetch_azure_plans() {
     local region="$1"
     local file="$CACHE_DIR/azure-plans-${region}.json"
     mkdir -p "$CACHE_DIR"
+    info "Fetching Azure VM sizes for ${region} via az vm list-skus (may take 1-2 minutes)..."
     if python3 - "$file" "$region" <<'PY'
 import json, sys, time, subprocess, urllib.request, urllib.parse
-TARGET = ['Standard_B1ls', 'Standard_B1s', 'Standard_B1ms', 'Standard_B2s', 'Standard_B2ms']
-SPECS  = {'Standard_B1ls': '1C/512MB', 'Standard_B1s': '1C/1GB', 'Standard_B1ms': '1C/2GB',
-          'Standard_B2s': '2C/4GB', 'Standard_B2ms': '2C/8GB'}
-NOTES  = {'Standard_B1ls': '(not recommended: OOM risk with Forgejo+Postgres)',
-          'Standard_B1s':  '(recommended minimum)'}
 file, region = sys.argv[1], sys.argv[2]
 try:
-    # az vm list-skus gives accurate per-subscription availability including capacity restrictions
     out = subprocess.run(
         ['az', 'vm', 'list-skus', '--location', region,
-         '--resource-type', 'virtualMachines', '--size', 'Standard_B',
-         '--output', 'json'],
-        capture_output=True, text=True, timeout=120
+         '--resource-type', 'virtualMachines', '--output', 'json'],
+        capture_output=True, text=True, timeout=300
     )
     if out.returncode != 0:
         raise RuntimeError(out.stderr.strip() or 'az vm list-skus failed')
-    available = set()
+
+    # Collect available B-series VMs with specs from capabilities field
+    available = {}  # name -> {vcpu, mem_gb}
     for sku in json.loads(out.stdout):
         name = sku.get('name', '')
-        if name not in TARGET:
+        if 'Standard_B' not in name:
             continue
-        # Location-type restriction means the SKU cannot be deployed in this region
-        restricted = any(r.get('type') == 'Location' for r in sku.get('restrictions', []))
-        if not restricted:
-            available.add(name)
+        if any(r.get('type') == 'Location' for r in sku.get('restrictions', [])):
+            continue
+        caps = {c['name']: c['value'] for c in sku.get('capabilities', [])}
+        try:
+            vcpu   = int(caps.get('vCPUs', 0))
+            mem_gb = float(caps.get('MemoryGB', 0))
+        except (ValueError, TypeError):
+            continue
+        if vcpu > 0 and mem_gb > 0:
+            available[name] = {'vcpu': vcpu, 'mem_gb': mem_gb}
 
-    # Region-specific pricing from the public Azure Retail Prices API (no auth required)
+    # Fetch region-specific pricing (public API, no auth); chunk to stay under URL limits
     prices = {}
-    if available:
-        parts     = [f"armSkuName eq '{s}'" for s in available]
-        filt      = "(" + " or ".join(parts) + f") and armRegionName eq '{region}' and priceType eq 'Consumption'"
-        price_url = "https://prices.azure.com/api/retail/prices?$filter=" + urllib.parse.quote(filt)
-        with urllib.request.urlopen(price_url, timeout=15) as r:
+    names  = list(available)
+    for i in range(0, len(names), 10):
+        parts = [f"armSkuName eq '{n}'" for n in names[i:i+10]]
+        filt  = "(" + " or ".join(parts) + f") and armRegionName eq '{region}' and priceType eq 'Consumption'"
+        url   = "https://prices.azure.com/api/retail/prices?$filter=" + urllib.parse.quote(filt)
+        with urllib.request.urlopen(url, timeout=30) as r:
             pdata = json.load(r)
         for item in pdata.get('Items', []):
             sku  = item.get('armSkuName', '')
-            name = item.get('skuName', '')
-            if sku in available and 'Spot' not in name and 'Low Priority' not in name:
+            sname = item.get('skuName', '')
+            if sku in available and 'Spot' not in sname and 'Low Priority' not in sname:
                 cost = item.get('retailPrice', 0)
                 if sku not in prices or cost < prices[sku]:
                     prices[sku] = cost
 
+    # Sort by memory then vCPU; annotate smallest usable size as recommended minimum
+    sorted_skus = sorted(available.items(), key=lambda x: (x[1]['mem_gb'], x[1]['vcpu']))
     items = []
-    for t in TARGET:
-        if t not in available:
-            continue
-        desc = SPECS.get(t, t)
-        cost = prices.get(t, 0)
+    recommended_shown = False
+    for name, specs in sorted_skus:
+        vcpu, mem_gb = specs['vcpu'], specs['mem_gb']
+        mem_str = f"{int(mem_gb)}GB" if mem_gb == int(mem_gb) else f"{mem_gb}GB"
+        cost    = prices.get(name, 0)
+        desc    = f"{vcpu}C/{mem_str}"
         if cost > 0:
             desc += f"  ~${cost * 730:.0f}/mo"
-        note = NOTES.get(t, '')
-        if note:
-            desc += f"  {note}"
-        items.append({'code': t, 'desc': desc})
+        if mem_gb < 2:
+            desc += "  (not recommended: OOM risk with Forgejo+Postgres)"
+        elif not recommended_shown:
+            desc += "  (recommended minimum)"
+            recommended_shown = True
+        items.append({'code': name, 'desc': desc})
 
     json.dump({'ts': int(time.time()), 'items': items, 'region': region}, open(file, 'w'))
     sys.exit(0)
@@ -334,7 +342,7 @@ except Exception as e:
     sys.exit(1)
 PY
     then
-        info "Fetched Azure VM availability for ${region} via az vm list-skus."
+        info "Fetched Azure VM availability for ${region}."
     else
         return 1
     fi
@@ -627,7 +635,7 @@ case "$PROVIDER" in
         ;;
     azure)
         [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="eastus"
-        [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN="Standard_B1s"
+        [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN=""
 
         # Azure regions: no free unauthenticated list API; use static list
         REGIONS=(
@@ -659,16 +667,8 @@ case "$PROVIDER" in
 
         PLANS=()
         [[ -f "$PLAN_CACHE" ]] && load_cache_items PLANS "$PLAN_CACHE"
-        if [[ ${#PLANS[@]} -eq 0 ]]; then
-            warn "Could not verify VM availability in ${REGION}; showing all sizes (some may be unavailable)."
-            PLANS=(
-                "Standard_B1ls:1C/512MB   ~\$4/mo   (not recommended: OOM risk with Forgejo+Postgres)"
-                "Standard_B1s:1C/1GB      ~\$8/mo   (recommended minimum)"
-                "Standard_B1ms:1C/2GB     ~\$15/mo"
-                "Standard_B2s:2C/4GB      ~\$30/mo"
-                "Standard_B2ms:2C/8GB     ~\$61/mo"
-            )
-        fi
+        [[ ${#PLANS[@]} -gt 0 ]] \
+            || error "No Azure VM sizes retrieved for ${REGION}. Ensure 'az' is logged in and retry with --refresh."
         # Reset default if prior plan is not available in the new region
         _plan_ok=false
         for _p in "${PLANS[@]}"; do [[ "${_p%%:*}" == "$CURRENT_PLAN" ]] && { _plan_ok=true; break; }; done
