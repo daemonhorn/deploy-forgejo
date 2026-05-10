@@ -483,29 +483,39 @@ case "$PROVIDER" in
     azure)
         [ -f azure_credentials ] || error "azure_credentials file not found in $SCRIPT_DIR"
         # Parse JSON credentials; support both az-cli field names (appId/password/tenant)
-        # and the SDK-auth aliases (clientId/clientSecret/tenantId/subscriptionId).
-        # shlex.quote ensures values with special characters are safely shell-escaped.
-        eval "$(python3 - <<'PY'
+        # and SDK-auth aliases (clientId/clientSecret/tenantId/subscriptionId).
+        # Write exports to a temp file and source it — eval "$(python3 ...)" masks Python's
+        # exit code (eval "" returns 0 even when python3 exits 1), causing silent failures.
+        _azure_env="$(mktemp)"
+        python3 - "$_azure_env" <<'PY' || error "Cannot load azure_credentials — see error above."
 import json, sys, shlex
 try:
     d = json.load(open("azure_credentials"))
 except Exception as e:
     sys.exit(f"Cannot parse azure_credentials: {e}")
-def get(key, *aliases):
+def require(key, *aliases):
     for k in (key,) + aliases:
         if k in d and d[k]:
             return d[k]
-    sys.exit(f"azure_credentials: missing required field '{key}' (aliases checked: {aliases})")
+    checked = ', '.join((key,) + aliases)
+    hint = ("\n  Tip: 'az ad sp create-for-rbac' output does not include subscriptionId."
+            "\n  Add it manually: {\"subscriptionId\": \"<id>\", ...}"
+            "\n  Find your subscription ID with: az account show --query id -o tsv") \
+           if key == "subscriptionId" else ""
+    sys.exit(f"azure_credentials: missing required field '{key}' (checked: {checked}){hint}")
 pairs = [
-    ("ARM_CLIENT_ID",       get("clientId",     "appId")),
-    ("ARM_CLIENT_SECRET",   get("clientSecret",  "password")),
-    ("ARM_SUBSCRIPTION_ID", get("subscriptionId")),
-    ("ARM_TENANT_ID",       get("tenantId",      "tenant")),
+    ("ARM_CLIENT_ID",       require("clientId",       "appId")),
+    ("ARM_CLIENT_SECRET",   require("clientSecret",   "password")),
+    ("ARM_SUBSCRIPTION_ID", require("subscriptionId", "subscription_id", "subscription")),
+    ("ARM_TENANT_ID",       require("tenantId",       "tenant")),
 ]
-for k, v in pairs:
-    print(f"export {k}={shlex.quote(v)}")
+with open(sys.argv[1], 'w') as f:
+    for k, v in pairs:
+        f.write(f"export {k}={shlex.quote(v)}\n")
 PY
-        )"
+        # shellcheck disable=SC1090
+        source "$_azure_env"
+        rm -f "$_azure_env"
         TF_DIR="$SCRIPT_DIR/terraform/azure"
         ;;
 esac
@@ -672,7 +682,7 @@ case "$PROVIDER" in
         for _p in "${PLANS[@]}"; do [[ "${_p%%:*}" == "$CURRENT_PLAN" ]] && { _plan_ok=true; break; }; done
         $_plan_ok || CURRENT_PLAN="${PLANS[0]%%:*}"
 
-        show_menu "Azure VM sizes available in ${REGION} - B-series burstable ($(cache_age_str "$PLAN_CACHE")):" \
+        show_menu "Azure VM sizes available in ${REGION} - B-series burstable ($(cache_age_str "$PLAN_CACHE"); capacity limits not checkable in advance — try another size/region if SkuNotAvailable):" \
             "$CURRENT_PLAN" "${PLANS[@]}"
         PLAN="$_MENU_RESULT"
         ;;
