@@ -43,7 +43,42 @@ apt-get $APT_OPTS upgrade -y \
     -o Dpkg::Options::="--force-confold"
 info "System packages up to date."
 
-# ── 0b. Unattended upgrades — daily at 08:00 UTC, including kernels ───────────
+# ── 0. Configure host firewall (UFW) ─────────────────────────────────────────
+# Docker bypasses UFW for container-mapped ports (80, 443), but host services
+# like sshd-forgejo on port 2222 go through UFW. Allow required ports explicitly.
+# The Vultr cloud firewall is the perimeter control; UFW provides host-level defense.
+if command -v ufw &>/dev/null; then
+    info "Configuring UFW firewall rules..."
+    ufw allow 22/tcp   comment 'SSH admin'    >/dev/null
+    ufw allow 80/tcp   comment 'HTTP'         >/dev/null
+    ufw allow 443/tcp  comment 'HTTPS'        >/dev/null
+    ufw allow 2222/tcp comment 'Forgejo SSH'  >/dev/null
+    info "UFW rules updated."
+fi
+
+# ── 1. Install Docker Engine ──────────────────────────────────────────────────
+if ! command -v docker &>/dev/null; then
+    info "Installing Docker..."
+    apt-get $APT_OPTS update
+    apt-get $APT_OPTS install -y ca-certificates curl gnupg lsb-release
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/debian/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/debian $(lsb_release -cs) stable" \
+        > /etc/apt/sources.list.d/docker.list
+    apt-get $APT_OPTS update
+    apt-get $APT_OPTS install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin python3
+    systemctl enable --now docker
+    info "Docker installed."
+else
+    info "Docker already installed, skipping."
+fi
+
+# ── 1b. Unattended upgrades — daily at 08:00 UTC, including kernels ──────────
+# Placed after Docker install so all apt operations in this session complete
+# before the timer is enabled and can fire in the background.
 if [ ! -f /etc/apt/apt.conf.d/50unattended-upgrades ] || \
    ! grep -q 'Forgejo-deploy' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null; then
     info "Configuring unattended-upgrades..."
@@ -93,40 +128,7 @@ TIMEREOF
     info "Unattended upgrades configured (daily at 08:00 UTC, auto-reboot enabled)."
 fi
 
-# ── 0. Configure host firewall (UFW) ─────────────────────────────────────────
-# Docker bypasses UFW for container-mapped ports (80, 443), but host services
-# like sshd-forgejo on port 2222 go through UFW. Allow required ports explicitly.
-# The Vultr cloud firewall is the perimeter control; UFW provides host-level defense.
-if command -v ufw &>/dev/null; then
-    info "Configuring UFW firewall rules..."
-    ufw allow 22/tcp   comment 'SSH admin'    >/dev/null
-    ufw allow 80/tcp   comment 'HTTP'         >/dev/null
-    ufw allow 443/tcp  comment 'HTTPS'        >/dev/null
-    ufw allow 2222/tcp comment 'Forgejo SSH'  >/dev/null
-    info "UFW rules updated."
-fi
-
-# ── 1. Install Docker Engine ──────────────────────────────────────────────────
-if ! command -v docker &>/dev/null; then
-    info "Installing Docker..."
-    apt-get $APT_OPTS update
-    apt-get $APT_OPTS install -y ca-certificates curl gnupg lsb-release
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/debian/gpg \
-        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    chmod a+r /etc/apt/keyrings/docker.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/debian $(lsb_release -cs) stable" \
-        > /etc/apt/sources.list.d/docker.list
-    apt-get $APT_OPTS update
-    apt-get $APT_OPTS install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin python3
-    systemctl enable --now docker
-    info "Docker installed."
-else
-    info "Docker already installed, skipping."
-fi
-
-# ── 1b. Kernel lockdown (integrity mode) ─────────────────────────────────────
+# ── 1d. Kernel lockdown (integrity mode) ─────────────────────────────────────
 # integrity mode prevents writing to kernel memory (driver signing, kprobes, etc.)
 # confidentiality mode is too restrictive for ops (breaks kexec, hibernate).
 info "Enabling kernel lockdown (integrity mode)..."
