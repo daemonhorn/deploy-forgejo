@@ -13,16 +13,27 @@ info()  { echo -e "${GREEN}[deploy]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[deploy]${NC} $*"; }
 error() { echo -e "${RED}[deploy]${NC} $*" >&2; exit 1; }
 
-# Wait for any background apt/dpkg process (e.g. unattended-upgrades triggered by
-# Persistent=true timer on first boot) to release the lock before we run apt.
+# Suppress debconf interactive prompts for every apt-get call in this script.
+# NEEDRESTART_MODE=a tells needrestart (Debian 12 default) to auto-restart
+# services without prompting — without this, apt-get install hangs waiting
+# for user input even with -y.
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
+# Wait for any background apt/dpkg process to release the lock before running apt.
+# Shows the holding PID and command for diagnostics, times out after 5 minutes.
 wait_for_apt_lock() {
     local waited=0
     while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \
               >/dev/null 2>&1; do
-        [ "$waited" -eq 0 ] && info "Waiting for apt/dpkg lock (held by another process)..."
+        if [ "$waited" -eq 0 ]; then
+            local holder
+            holder="$(fuser /var/lib/dpkg/lock-frontend 2>/dev/null || true)"
+            info "Waiting for apt/dpkg lock (held by PID ${holder:-?}: $(ps -p "${holder:-1}" -o comm= 2>/dev/null || true))..."
+        fi
         waited=$((waited + 3))
         [ "$waited" -lt 300 ] \
-            || error "apt/dpkg lock held for 5+ minutes — check: fuser /var/lib/dpkg/lock-frontend"
+            || error "apt/dpkg lock held for 5+ minutes — run: fuser /var/lib/dpkg/lock-frontend"
         sleep 3
     done
     [ "$waited" -gt 0 ] && info "apt lock released after ${waited}s."
@@ -33,8 +44,9 @@ cd "$WORKDIR"
 
 # ── 0a. Update all system packages ───────────────────────────────────────────
 info "Updating system packages (this may take a minute on first run)..."
+wait_for_apt_lock
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq \
+apt-get upgrade -y \
     -o Dpkg::Options::="--force-confdef" \
     -o Dpkg::Options::="--force-confold"
 info "System packages up to date."
@@ -44,7 +56,7 @@ if [ ! -f /etc/apt/apt.conf.d/50unattended-upgrades ] || \
    ! grep -q 'Forgejo-deploy' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null; then
     info "Configuring unattended-upgrades..."
     wait_for_apt_lock
-    apt-get install -y -qq unattended-upgrades
+    apt-get install -y unattended-upgrades
 
     DISTRO_CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
 
@@ -108,7 +120,7 @@ if ! command -v docker &>/dev/null; then
     info "Installing Docker..."
     wait_for_apt_lock
     apt-get update -qq
-    apt-get install -y -qq ca-certificates curl gnupg lsb-release
+    apt-get install -y ca-certificates curl gnupg lsb-release
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/debian/gpg \
         | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -117,7 +129,7 @@ if ! command -v docker &>/dev/null; then
 https://download.docker.com/linux/debian $(lsb_release -cs) stable" \
         > /etc/apt/sources.list.d/docker.list
     apt-get update -qq
-    apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin python3
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin python3
     systemctl enable --now docker
     info "Docker installed."
 else
