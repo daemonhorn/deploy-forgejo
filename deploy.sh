@@ -226,7 +226,7 @@ docker exec "$NGINX_CTR" nginx -s reload \
 # Wait until port 443 is actually accepting connections (reload is async).
 info "Waiting for nginx to accept connections on port 443..."
 ATTEMPTS=0
-until nc -z localhost 443 2>/dev/null; do
+until curl -sk -o /dev/null --max-time 3 https://localhost 2>/dev/null; do
     ATTEMPTS=$((ATTEMPTS + 1))
     [ "$ATTEMPTS" -lt 15 ] || error "nginx did not start listening on port 443 after 30s"
     sleep 2
