@@ -4,6 +4,10 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 4.0"
     }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.12"
+    }
   }
 }
 
@@ -11,6 +15,16 @@ terraform {
 resource "azurerm_resource_group" "main" {
   name     = var.hostname
   location = var.region
+}
+
+# Azure's control plane can return 200 for resource group creation but not yet
+# propagate the group to child resource APIs, causing sporadic 404 Read-after-Create
+# failures (Terraform reports "Root object was present, but now absent").
+# A 30-second pause after the RG is ready eliminates this race for all child resources.
+# See: https://github.com/hashicorp/terraform-provider-azurerm/issues/27087
+resource "time_sleep" "rg_propagation" {
+  depends_on      = [azurerm_resource_group.main]
+  create_duration = "30s"
 }
 
 resource "azurerm_virtual_network" "main" {
@@ -44,6 +58,7 @@ resource "azurerm_public_ip" "main" {
   resource_group_name = azurerm_resource_group.main.name
   allocation_method   = "Static"
   sku                 = "Standard"
+  depends_on          = [time_sleep.rg_propagation]
 }
 
 locals {
@@ -83,6 +98,7 @@ resource "azurerm_network_security_group" "main" {
   name                = "${var.hostname}-nsg"
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
+  depends_on          = [time_sleep.rg_propagation]
 
   dynamic "security_rule" {
     for_each = local.firewall_rules
