@@ -710,15 +710,21 @@ SSH_KEY="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
 info "Running Terraform ($PROVIDER)..."
 cd "$TF_DIR"
 
-# Azure resource groups take time to fully delete after `az group delete --no-wait`.
-# If the group exists in a deprovisioning state, Terraform gets 409 Conflict on
-# every resource create. Poll until it's gone before starting apply.
+# On reprovisioning runs the old resource group may still exist.  Terraform cannot
+# create resources inside a group that is being deleted (409 Conflict) or that
+# already exists with the same name (conflict on RG create).  Delete it first if
+# present, then wait for Azure to finish the deletion before starting apply.
 if [[ "$PROVIDER" == "azure" ]]; then
     _rg_name="$(grep 'hostname' "${TF_DIR}/terraform.tfvars" | awk -F'"' '{print $2}')"
     if [[ -n "$_rg_name" ]]; then
         _rg_state="$(az group show --name "$_rg_name" --query properties.provisioningState -o tsv 2>/dev/null || echo "Deleted")"
         if [[ "$_rg_state" != "Deleted" ]]; then
-            info "Waiting for resource group '$_rg_name' to finish deleting (state: ${_rg_state})..."
+            if [[ "$_rg_state" != "Deleting" ]]; then
+                info "Deleting existing resource group '$_rg_name' (state: ${_rg_state}) before reprovisioning..."
+                az group delete --name "$_rg_name" --yes --no-wait
+            else
+                info "Resource group '$_rg_name' is already being deleted; waiting..."
+            fi
             for _i in $(seq 1 60); do
                 sleep 10
                 _rg_state="$(az group show --name "$_rg_name" --query properties.provisioningState -o tsv 2>/dev/null || echo "Deleted")"
