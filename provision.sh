@@ -1117,7 +1117,7 @@ echo "  Admin SSH : ssh deploy@${IP}   (root login disabled after hardening)"
 echo
 echo "  Forgejo admin credentials:"
 echo "    Username : ${FORGEJO_ADMIN_USER}"
-echo "    Password : vault kv get -field=admin_password secret/forgejo/deploy"
+echo "    Password : VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=\$(cat ${SCRIPT_DIR}/.vault.token) vault kv get -field=admin_password secret/forgejo/deploy"
 echo
 echo "  To add a user:"
 echo "    ./sign-user-key.sh <username> /path/to/user_key.pub"
