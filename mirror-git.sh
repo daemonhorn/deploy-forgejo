@@ -190,25 +190,25 @@ if [[ -z "$SRC_TOKEN" ]]; then
     SRC_TOKEN="$(printf '%s\n' "$SRC_TOKEN" | tail -1 | tr -d '[:space:]')"
     [[ -n "$SRC_TOKEN" ]] \
         || error "Could not obtain source admin token. Pass --src-token TOKEN."
-    _st="$(curl -sf --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
-        -H "Authorization: token $SRC_TOKEN" -o /dev/null -w "%{http_code}" \
+    _src_resp="$(mktemp)"
+    _st="$(curl -sS --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
+        -H "Authorization: token $SRC_TOKEN" -o "$_src_resp" -w "%{http_code}" \
         "$SRC_URL/api/v1/user" 2>/dev/null || true)"
     if [[ "$_st" != "200" ]]; then
+        warn "Source token validation: HTTP ${_st:-no response}."
+        warn "  Admin user: $_admin_user   Host: $_src_ip"
+        warn "  Token len=${#SRC_TOKEN} prefix=${SRC_TOKEN:0:6}"
+        warn "  Response body: $(tr -d '\n' < "$_src_resp" | head -c 400)"
         if [[ "$_st" == "403" ]]; then
-            warn "Source token validation: HTTP 403 (token accepted but insufficient scope)."
-            warn "  Admin user: $_admin_user   Host: $_src_ip"
             warn "  Generate a token manually, then re-run with --src-token TOKEN:"
             warn "    ssh deploy@$_src_ip docker exec -u git forgejo /usr/local/bin/forgejo admin user generate-access-token --username $_admin_user --token-name manual-src --scopes '$_FORGEJO_ADMIN_SCOPES' --raw"
         elif [[ "$_st" == "401" ]]; then
-            warn "Source token validation: HTTP 401 (token not recognised — may be malformed)."
-            warn "  Admin user: $_admin_user   Host: $_src_ip"
             warn "  Check that the admin user exists: ssh deploy@$_src_ip docker exec -u git forgejo forgejo admin user list"
-        else
-            warn "Source token validation: HTTP ${_st:-no response}."
-            warn "  Admin user: $_admin_user   Host: $_src_ip"
         fi
+        rm -f "$_src_resp"
         error "Source token validation failed (HTTP ${_st:-no response})."
     fi
+    rm -f "$_src_resp"
     info "Source admin token obtained."
 fi
 
@@ -427,25 +427,25 @@ if [[ -z "$DEST_TOKEN" ]]; then
     DEST_TOKEN="$(printf '%s\n' "$DEST_TOKEN" | tail -1 | tr -d '[:space:]')"
     [[ -n "$DEST_TOKEN" ]] \
         || error "Could not obtain destination admin token. Pass --dest-token TOKEN."
-    _dt="$(curl -sf --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
-        -H "Authorization: token $DEST_TOKEN" -o /dev/null -w "%{http_code}" \
+    _dst_resp="$(mktemp)"
+    _dt="$(curl -sS --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
+        -H "Authorization: token $DEST_TOKEN" -o "$_dst_resp" -w "%{http_code}" \
         "$DEST_URL/api/v1/user" 2>/dev/null || true)"
     if [[ "$_dt" != "200" ]]; then
+        warn "Destination token validation: HTTP ${_dt:-no response}."
+        warn "  Admin user: $_admin_user   Host: $_dst_host"
+        warn "  Token len=${#DEST_TOKEN} prefix=${DEST_TOKEN:0:6}"
+        warn "  Response body: $(tr -d '\n' < "$_dst_resp" | head -c 400)"
         if [[ "$_dt" == "403" ]]; then
-            warn "Destination token validation: HTTP 403 (token accepted but insufficient scope)."
-            warn "  Admin user: $_admin_user   Host: $_dst_host"
             warn "  Generate a token manually, then re-run with --dest-token TOKEN:"
             warn "    ssh deploy@$_dst_host docker exec -u git forgejo /usr/local/bin/forgejo admin user generate-access-token --username $_admin_user --token-name manual-dst --scopes '$_FORGEJO_ADMIN_SCOPES' --raw"
         elif [[ "$_dt" == "401" ]]; then
-            warn "Destination token validation: HTTP 401 (token not recognised — may be malformed)."
-            warn "  Admin user: $_admin_user   Host: $_dst_host"
             warn "  Check that the admin user exists: ssh deploy@$_dst_host docker exec -u git forgejo forgejo admin user list"
-        else
-            warn "Destination token validation: HTTP ${_dt:-no response}."
-            warn "  Admin user: $_admin_user   Host: $_dst_host"
         fi
+        rm -f "$_dst_resp"
         error "Destination token validation failed (HTTP ${_dt:-no response})."
     fi
+    rm -f "$_dst_resp"
     info "Destination admin token obtained."
 fi
 
