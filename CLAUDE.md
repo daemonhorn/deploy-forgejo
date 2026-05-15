@@ -23,6 +23,13 @@ Automates deployment of a [Forgejo](https://forgejo.org/) container instance on 
 ./sign-user-key.sh <forgejo-username> <user-key.pub>
 ```
 
+**Export / backup all repositories:**
+```
+./export-git.sh                          # auto-detects URL + token; interactive
+./export-git.sh --output backup.tar.zst  # explicit output file
+./export-git.sh --forgejo-url https://IP --admin-token TOKEN --output backup.tar.zst  # unattended/cron
+```
+
 ## Architecture
 
 ### Cloud-Provider Abstraction
@@ -79,6 +86,7 @@ Forgejo's **built-in SSH server is disabled** (`START_SSH_SERVER = false`). A se
 | `provision.sh` | Orchestrates terraform + deploy; reads all secrets from Vault |
 | `deploy.sh` | Remote: installs Docker, configures host sshd, issues cert, starts services |
 | `sign-user-key.sh` | Signs a user SSH key with the Yubikey CA via PKCS#11 |
+| `export-git.sh` | Exports all Forgejo repositories to a portable tar.zst archive (cron-safe) |
 | `files/forgejo-keys.sh` | Deployed to VPS; called by sshd AuthorizedKeysCommand |
 | `files/forgejo-cert-extract.py` | Parses SSH cert binary to extract base public key |
 | `files/sshd_forgejo.conf` | sshd config for port-2222 Forgejo SSH daemon |
@@ -93,6 +101,7 @@ Before running `setup.sh`:
 - `ykcs11` — `apt install ykcs11` (provides `libykcs11.so` for PKCS#11 signing)
 - `terraform` — from HashiCorp (>= 1.5)
 - `envsubst`, `openssl`, `uuidgen` — standard packages
+- `zstd` — `apt install zstd`; required by `export-git.sh` for archive compression
 
 ## Secrets and Security
 
