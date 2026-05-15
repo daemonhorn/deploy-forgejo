@@ -604,7 +604,7 @@ _destroy_workspace() {
     local _display_addr="${ip:-${ipv6:-unknown}}"
     warn "This will permanently destroy $PROVIDER infrastructure for workspace '${ws}' (IP: ${_display_addr})."
     if ! $NON_INTERACTIVE; then
-        read -rp "[provision] Type 'yes' to confirm: " confirmed
+        read -rp "[provision] Type 'yes' to confirm: " confirmed </dev/tty
         [[ "$confirmed" == "yes" ]] || { warn "Skipped workspace '${ws}'."; return 0; }
     fi
 
