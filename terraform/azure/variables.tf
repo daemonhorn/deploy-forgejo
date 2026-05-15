@@ -31,3 +31,9 @@ variable "firewall_ports" {
   type        = list(number)
   default     = [22, 80, 443, 2222]
 }
+
+variable "ip_stack" {
+  description = "IP stack: 'ipv4' (default), 'dual' (IPv4 + IPv6), or 'ipv6' (IPv6 only)."
+  type        = string
+  default     = "ipv4"
+}

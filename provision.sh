@@ -360,6 +360,7 @@ PLAN_ARG=""
 DESTROY_IP=""
 DESTROY_ALL=false
 LOG_FILE="${SCRIPT_DIR}/.provision-log.json"
+IP_STACK="ipv4"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -393,8 +394,13 @@ while [[ $# -gt 0 ]]; do
         --plan)
             [[ $# -ge 2 ]] || error "--plan requires a value"
             PLAN_ARG="$2"; shift 2 ;;
+        --ip-stack)
+            [[ $# -ge 2 ]] || error "--ip-stack requires ipv4|ipv6|dual"
+            IP_STACK="$2"
+            [[ "$IP_STACK" =~ ^(ipv4|ipv6|dual)$ ]] || error "--ip-stack must be 'ipv4', 'ipv6', or 'dual'"
+            shift 2 ;;
         *)
-            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--debug]" ;;
+            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--ip-stack ipv4|ipv6|dual] [--debug]" ;;
     esac
 done
 
@@ -587,7 +593,7 @@ PY
 
 # Destroy a single Terraform workspace (init + select + destroy + workspace delete + log).
 _destroy_workspace() {
-    local ws="$1" ip="$2" confirmed ts destroy_args wsfile
+    local ws="$1" ip="$2" ipv6="${3:-}" ip_stack="${4:-}" confirmed ts destroy_args wsfile
 
     if [[ "$ws" == "default" ]]; then
         wsfile="${TF_DIR}/terraform.tfvars"
@@ -595,7 +601,8 @@ _destroy_workspace() {
         wsfile="${TF_DIR}/terraform.${ws}.tfvars"
     fi
 
-    warn "This will permanently destroy $PROVIDER infrastructure for workspace '${ws}' (IP: ${ip})."
+    local _display_addr="${ip:-${ipv6:-unknown}}"
+    warn "This will permanently destroy $PROVIDER infrastructure for workspace '${ws}' (IP: ${_display_addr})."
     if ! $NON_INTERACTIVE; then
         read -rp "[provision] Type 'yes' to confirm: " confirmed
         [[ "$confirmed" == "yes" ]] || { warn "Skipped workspace '${ws}'."; return 0; }
@@ -609,15 +616,15 @@ _destroy_workspace() {
         return 0
     fi
 
-    info "Destroying $PROVIDER infrastructure for workspace '${ws}' (IP: ${ip})..."
+    info "Destroying $PROVIDER infrastructure for workspace '${ws}' (IP: ${_display_addr})..."
     destroy_args=(-auto-approve -input=false)
     [[ "$ws" != "default" && -f "$wsfile" ]] && destroy_args+=(-var-file="$wsfile")
     terraform destroy "${destroy_args[@]}"
 
     # Write log entry before workspace delete so the record exists even if delete fails.
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    _log_event "$(printf '{"action":"destroy","ts":"%s","provider":"%s","workspace":"%s","ip":"%s","region":"","plan":""}' \
-        "$ts" "$PROVIDER" "$ws" "$ip")"
+    _log_event "$(printf '{"action":"destroy","ts":"%s","provider":"%s","workspace":"%s","ip":"%s","ipv6":"%s","ip_stack":"%s","region":"","plan":""}' \
+        "$ts" "$PROVIDER" "$ws" "$ip" "$ipv6" "$ip_stack")"
 
     if [[ "$ws" != "default" ]]; then
         terraform workspace select default 2>/dev/null || true
@@ -639,21 +646,26 @@ if $DESTROY; then
         if [[ "$_instance_count" -eq 0 ]]; then
             warn "No active $PROVIDER instances in provision log; attempting current workspace."
             cd "$TF_DIR"; terraform init -input=false >/dev/null
-            _existing_ip="$(terraform output -raw public_ipv4 2>/dev/null || echo "unknown")"; cd "$SCRIPT_DIR"
-            _destroy_workspace "$WORKSPACE" "$_existing_ip"
+            _existing_ip="$(terraform output -raw public_ipv4 2>/dev/null || true)"
+            _existing_ipv6="$(terraform output -raw public_ipv6 2>/dev/null || true)"
+            cd "$SCRIPT_DIR"
+            _destroy_workspace "$WORKSPACE" "${_existing_ip:-unknown}" "$_existing_ipv6"
         else
             info "Destroying all active $PROVIDER instances:"
             python3 -c "
 import json, sys
 for r in json.loads(sys.argv[1]):
-    print('  workspace={:<20} ip={:<16} region={:<15} plan={}'.format(
-        r.get('workspace','default'), r.get('ip','unknown'),
+    ip_str = r.get('ip','') or r.get('ipv6','unknown')
+    print('  workspace={:<20} ip={:<45} region={:<15} plan={}'.format(
+        r.get('workspace','default'), ip_str,
         r.get('region',''), r.get('plan','')))
 " "$_instances_json"
             while IFS= read -r _rec; do
                 _ws="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('workspace','default'))" "$_rec")"
-                _ip="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip','unknown'))" "$_rec")"
-                _destroy_workspace "$_ws" "$_ip"
+                _ip="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip',''))" "$_rec")"
+                _ipv6="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ipv6',''))" "$_rec")"
+                _ip_stack="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip_stack',''))" "$_rec")"
+                _destroy_workspace "$_ws" "$_ip" "$_ipv6" "$_ip_stack"
             done < <(python3 -c "import json,sys; [print(json.dumps(r)) for r in json.loads(sys.argv[1])]" "$_instances_json")
         fi
         info "All destroy operations complete."
@@ -664,7 +676,7 @@ for r in json.loads(sys.argv[1]):
         _target="$(python3 -c "
 import json, sys
 recs = json.loads(sys.argv[1])
-matches = [r for r in recs if r.get('ip') == sys.argv[2]]
+matches = [r for r in recs if r.get('ip') == sys.argv[2] or r.get('ipv6') == sys.argv[2]]
 print(json.dumps(matches[0]) if matches else '')
 " "$_instances_json" "$DESTROY_IP")"
         if [[ -z "$_target" ]]; then
@@ -672,7 +684,9 @@ print(json.dumps(matches[0]) if matches else '')
             _destroy_workspace "$WORKSPACE" "$DESTROY_IP"
         else
             _ws="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('workspace','default'))" "$_target")"
-            _destroy_workspace "$_ws" "$DESTROY_IP"
+            _ipv6="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ipv6',''))" "$_target")"
+            _ip_stack="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip_stack',''))" "$_target")"
+            _destroy_workspace "$_ws" "$DESTROY_IP" "$_ipv6" "$_ip_stack"
         fi
         exit 0
     fi
@@ -681,31 +695,37 @@ print(json.dumps(matches[0]) if matches else '')
     # show picker when multiple instances exist (interactive only).
     if [[ "$WORKSPACE" != "default" ]]; then
         # Explicit workspace targeted via --workspace
-        _target_ip="$(python3 -c "
+        _target_rec="$(python3 -c "
 import json, sys
 recs = json.loads(sys.argv[1])
 matches = [r for r in recs if r.get('workspace') == sys.argv[2]]
-print(matches[0].get('ip','unknown') if matches else 'unknown')
+print(json.dumps(matches[0]) if matches else '{}')
 " "$_instances_json" "$WORKSPACE")"
-        _destroy_workspace "$WORKSPACE" "$_target_ip"
+        _target_ip="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip','unknown'))" "$_target_rec")"
+        _target_ipv6="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ipv6',''))" "$_target_rec")"
+        _target_stack="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip_stack',''))" "$_target_rec")"
+        _destroy_workspace "$WORKSPACE" "$_target_ip" "$_target_ipv6" "$_target_stack"
     elif [[ "$_instance_count" -gt 1 ]] && ! $NON_INTERACTIVE; then
         info "Multiple active $PROVIDER instances — select one to destroy:"
-        _ws_list=(); _ip_list=(); _i=1
+        _ws_list=(); _ip_list=(); _ipv6_list=(); _stack_list=(); _i=1
         while IFS= read -r _rec; do
             _ws="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('workspace','default'))" "$_rec")"
-            _ip="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip','unknown'))" "$_rec")"
+            _ip="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip',''))" "$_rec")"
+            _ipv6="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ipv6',''))" "$_rec")"
+            _ip_stack="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip_stack',''))" "$_rec")"
             _region="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('region',''))" "$_rec")"
             _plan="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('plan',''))" "$_rec")"
-            printf "  %d) workspace=%-20s ip=%-16s region=%-15s plan=%s\n" \
-                "$_i" "$_ws" "$_ip" "$_region" "$_plan"
-            _ws_list+=("$_ws"); _ip_list+=("$_ip")
+            _display_ip="${_ip:-${_ipv6:-unknown}}"
+            printf "  %d) workspace=%-20s ip=%-45s region=%-15s plan=%s\n" \
+                "$_i" "$_ws" "$_display_ip" "$_region" "$_plan"
+            _ws_list+=("$_ws"); _ip_list+=("$_ip"); _ipv6_list+=("$_ipv6"); _stack_list+=("$_ip_stack")
             _i=$((_i + 1))
         done < <(python3 -c "import json,sys; [print(json.dumps(r)) for r in json.loads(sys.argv[1])]" "$_instances_json")
         read -rp "[provision] Enter number to destroy (1-$((_i-1))): " _choice
         [[ "$_choice" =~ ^[0-9]+$ && "$_choice" -ge 1 && "$_choice" -le $((_i-1)) ]] \
             || error "Invalid selection: $_choice"
         _idx=$((_choice - 1))
-        _destroy_workspace "${_ws_list[$_idx]}" "${_ip_list[$_idx]}"
+        _destroy_workspace "${_ws_list[$_idx]}" "${_ip_list[$_idx]}" "${_ipv6_list[$_idx]}" "${_stack_list[$_idx]}"
     else
         # Single instance, no log, or non-interactive: destroy current workspace.
         if [[ "$_instance_count" -eq 0 ]]; then
@@ -713,8 +733,10 @@ print(matches[0].get('ip','unknown') if matches else 'unknown')
                 || error "No terraform.tfvars at ${TF_DIR}/terraform.tfvars — has '$PROVIDER' been provisioned yet?"
         fi
         cd "$TF_DIR"; terraform init -input=false >/dev/null
-        _existing_ip="$(terraform output -raw public_ipv4 2>/dev/null || echo "unknown")"; cd "$SCRIPT_DIR"
-        _destroy_workspace "$WORKSPACE" "$_existing_ip"
+        _existing_ip="$(terraform output -raw public_ipv4 2>/dev/null || true)"
+        _existing_ipv6="$(terraform output -raw public_ipv6 2>/dev/null || true)"
+        cd "$SCRIPT_DIR"
+        _destroy_workspace "$WORKSPACE" "${_existing_ip:-unknown}" "$_existing_ipv6"
     fi
 
     exit 0
@@ -911,6 +933,7 @@ provider_name = "vultr"
 region        = "${REGION}"
 plan          = "${PLAN}"
 hostname      = "${HOSTNAME}"
+ip_stack      = "${IP_STACK}"
 EOF
         ;;
     aws|azure)
@@ -918,6 +941,7 @@ EOF
 region   = "${REGION}"
 plan     = "${PLAN}"
 hostname = "${HOSTNAME}"
+ip_stack = "${IP_STACK}"
 EOF
         ;;
 esac
@@ -968,52 +992,74 @@ _apply_args=(-auto-approve -input=false)
 terraform apply "${_apply_args[@]}"
 
 IP="$(terraform output -raw public_ipv4)"
+IPV6="$(terraform output -raw public_ipv6 2>/dev/null || true)"
 SSH_USER="$(terraform output -raw ssh_user)"
 cd "$SCRIPT_DIR"
 
 # Append provision event to the log (one JSON object per line, append-only).
-_log_event "$(printf '{"action":"provision","ts":"%s","provider":"%s","workspace":"%s","ip":"%s","region":"%s","plan":"%s"}' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PROVIDER" "$WORKSPACE" "$IP" "$REGION" "$PLAN")"
+_log_event "$(printf '{"action":"provision","ts":"%s","provider":"%s","workspace":"%s","ip":"%s","ipv6":"%s","region":"%s","plan":"%s","ip_stack":"%s"}' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PROVIDER" "$WORKSPACE" "$IP" "$IPV6" "$REGION" "$PLAN" "$IP_STACK")"
 
 # Persist provider selection so next run defaults to the same provider
 echo "$PROVIDER" > .last-provider
 
-# Domain is the VPS IP. LE issues IP certificates under the 'shortlived' profile
-# (160-hour validity); no DNS setup required.
-DOMAIN="$IP"
+# CONNECT_IP and DOMAIN: IPv6-only mode uses the IPv6 address; all other modes
+# use IPv4. LE issues IP certificates under the 'shortlived' profile (160-hour
+# validity) — both IPv4 and IPv6 IP addresses are supported by this profile.
+if [[ "$IP_STACK" == "ipv6" ]]; then
+    [[ -n "$IPV6" ]] || error "ip_stack=ipv6 but no IPv6 address in Terraform output"
+    CONNECT_IP="$IPV6"
+    DOMAIN="$IPV6"
+else
+    CONNECT_IP="$IP"
+    DOMAIN="$IP"
+fi
 
-info "VPS IP: $IP  SSH user: $SSH_USER  Provider: $PROVIDER"
+# ROOT_URL needs brackets around IPv6 literals in URLs (RFC 2732).
+# nginx server_name and certbot -d accept bare IPv6 addresses without brackets.
+if [[ "$CONNECT_IP" == *:* ]]; then
+    ROOT_URL_HOST="[${CONNECT_IP}]"
+else
+    ROOT_URL_HOST="$CONNECT_IP"
+fi
+
+# Wrap IPv6 addresses for SSH user@host syntax (ssh user@[2001:db8::1]).
+# IPv4 addresses pass through unchanged.
+_ssh_host() { [[ "$1" == *:* ]] && echo "[${1}]" || echo "$1"; }
+
+info "VPS  IPv4: ${IP:-none}  IPv6: ${IPV6:-none}  Connect: $CONNECT_IP  Provider: $PROVIDER"
 
 # ── Wait for SSH ──────────────────────────────────────────────────────────────
 info "Waiting for SSH to become available (this takes ~60-90 seconds)..."
 : > known_hosts.deploy
 ATTEMPTS=0
-until ssh-keyscan -p 22 -T 5 "$IP" >> known_hosts.deploy 2>/dev/null; do
+until ssh-keyscan -p 22 -T 5 "$CONNECT_IP" >> known_hosts.deploy 2>/dev/null; do
     ATTEMPTS=$((ATTEMPTS + 1))
-    [ "$ATTEMPTS" -lt 30 ] || error "Timed out waiting for SSH on $IP"
+    [ "$ATTEMPTS" -lt 30 ] || error "Timed out waiting for SSH on $CONNECT_IP"
     sleep 10
 done
 info "SSH port is up."
 
 SSH_OPTS="-i $SSH_KEY -o UserKnownHostsFile=./known_hosts.deploy -o StrictHostKeyChecking=yes"
+_SSH_HOST="$(_ssh_host "$CONNECT_IP")"
 
 # On AWS, user_data configures root access after sshd is already listening.
 # Retry the actual login until it succeeds (up to 3 extra minutes).
 # On re-runs after hardening, root login is disabled — fall back to deploy user.
 info "Verifying SSH login as $SSH_USER (will retry as 'deploy' if root is disabled)..."
 ATTEMPTS=0
-until ssh $SSH_OPTS -o ConnectTimeout=10 -o BatchMode=yes "${SSH_USER}@${IP}" true 2>/dev/null; do
+until ssh $SSH_OPTS -o ConnectTimeout=10 -o BatchMode=yes "${SSH_USER}@${_SSH_HOST}" true 2>/dev/null; do
     ATTEMPTS=$((ATTEMPTS + 1))
     [ "$ATTEMPTS" -lt 18 ] || break
     sleep 10
 done
 
-if ! ssh $SSH_OPTS -o ConnectTimeout=5 -o BatchMode=yes "${SSH_USER}@${IP}" true 2>/dev/null; then
+if ! ssh $SSH_OPTS -o ConnectTimeout=5 -o BatchMode=yes "${SSH_USER}@${_SSH_HOST}" true 2>/dev/null; then
     info "Login as $SSH_USER failed; trying deploy user (post-hardening re-run)..."
     ATTEMPTS=0
-    until ssh $SSH_OPTS -o ConnectTimeout=10 -o BatchMode=yes "deploy@${IP}" true 2>/dev/null; do
+    until ssh $SSH_OPTS -o ConnectTimeout=10 -o BatchMode=yes "deploy@${_SSH_HOST}" true 2>/dev/null; do
         ATTEMPTS=$((ATTEMPTS + 1))
-        [ "$ATTEMPTS" -lt 6 ] || error "Cannot log in as ${SSH_USER} or deploy@${IP} — check SSH key and firewall"
+        [ "$ATTEMPTS" -lt 6 ] || error "Cannot log in as ${SSH_USER} or deploy@${_SSH_HOST} — check SSH key and firewall"
         sleep 5
     done
     SSH_USER="deploy"
@@ -1025,14 +1071,16 @@ info "Rendering configuration templates..."
 TMPDIR="$(mktemp -d /tmp/forgejo-deploy-XXXXXX)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# Export vars for envsubst
-export DOMAIN DB_PASSWORD DB_USER DB_NAME FORGEJO_SECRET_KEY FORGEJO_INTERNAL_TOKEN
+# Export vars for envsubst.
+# ROOT_URL_HOST wraps IPv6 addresses in brackets for valid URL syntax (RFC 2732);
+# equals DOMAIN for IPv4 addresses.
+export DOMAIN ROOT_URL_HOST DB_PASSWORD DB_USER DB_NAME FORGEJO_SECRET_KEY FORGEJO_INTERNAL_TOKEN
 
 envsubst '${DOMAIN}' \
     < files/templates/nginx-http.conf.tmpl > "$TMPDIR/nginx-http.conf"
 envsubst '${DOMAIN}' \
     < files/templates/nginx.conf.tmpl > "$TMPDIR/nginx.conf"
-envsubst '${DOMAIN} ${DB_PASSWORD} ${DB_USER} ${DB_NAME} ${FORGEJO_SECRET_KEY} ${FORGEJO_INTERNAL_TOKEN}' \
+envsubst '${DOMAIN} ${ROOT_URL_HOST} ${DB_PASSWORD} ${DB_USER} ${DB_NAME} ${FORGEJO_SECRET_KEY} ${FORGEJO_INTERNAL_TOKEN}' \
     < files/templates/app.ini.tmpl > "$TMPDIR/app.ini"
 envsubst '${DB_PASSWORD} ${DB_USER} ${DB_NAME}' \
     < files/templates/.env.tmpl > "$TMPDIR/.env"
@@ -1043,7 +1091,7 @@ info "Copying files to VPS (as $SSH_USER)..."
 
 if [[ "$SSH_USER" == "root" ]]; then
     # First run: SSH as root, scp directly to /opt/forgejo
-    ssh $SSH_OPTS "${SSH_USER}@${IP}" "mkdir -p /opt/forgejo"
+    ssh $SSH_OPTS "${SSH_USER}@${_SSH_HOST}" "mkdir -p /opt/forgejo"
     scp $SSH_OPTS \
         "$TMPDIR/nginx-http.conf" \
         "$TMPDIR/nginx.conf" \
@@ -1055,13 +1103,13 @@ if [[ "$SSH_USER" == "root" ]]; then
         files/forgejo-cert-extract.py \
         files/sshd_forgejo.conf \
         ca.pub \
-        "${SSH_USER}@${IP}:/opt/forgejo/"
-    scp $SSH_OPTS deploy.sh "${SSH_USER}@${IP}:/opt/forgejo/deploy.sh"
+        "${SSH_USER}@${_SSH_HOST}:/opt/forgejo/"
+    scp $SSH_OPTS deploy.sh "${SSH_USER}@${_SSH_HOST}:/opt/forgejo/deploy.sh"
 else
     # Re-run after hardening: SSH as deploy; /opt/forgejo is chown root:deploy g+w
     # Stage to tmp first, then sudo-move into place
-    STAGE_DIR="$(ssh $SSH_OPTS "deploy@${IP}" "mktemp -d")"
-    trap 'ssh '"$SSH_OPTS"' "deploy@'"$IP"'" "rm -rf '"$STAGE_DIR"'" 2>/dev/null; rm -rf "$TMPDIR"' EXIT
+    STAGE_DIR="$(ssh $SSH_OPTS "deploy@${_SSH_HOST}" "mktemp -d")"
+    trap 'ssh '"$SSH_OPTS"' "deploy@'"$_SSH_HOST"'" "rm -rf '"$STAGE_DIR"'" 2>/dev/null; rm -rf "$TMPDIR"' EXIT
     scp $SSH_OPTS \
         "$TMPDIR/nginx-http.conf" \
         "$TMPDIR/nginx.conf" \
@@ -1074,8 +1122,8 @@ else
         files/sshd_forgejo.conf \
         ca.pub \
         deploy.sh \
-        "deploy@${IP}:${STAGE_DIR}/"
-    ssh $SSH_OPTS "deploy@${IP}" \
+        "deploy@${_SSH_HOST}:${STAGE_DIR}/"
+    ssh $SSH_OPTS "deploy@${_SSH_HOST}" \
         "sudo mv ${STAGE_DIR}/* /opt/forgejo/ && sudo rm -rf ${STAGE_DIR}"
 fi
 
@@ -1085,7 +1133,7 @@ info "Running deploy.sh on VPS as $SSH_USER..."
 SUDO_PREFIX=""
 [[ "$SSH_USER" != "root" ]] && SUDO_PREFIX="sudo env"
 # shellcheck disable=SC2086
-ssh $SSH_OPTS "${SSH_USER}@${IP}" \
+ssh $SSH_OPTS "${SSH_USER}@${_SSH_HOST}" \
     "${SUDO_PREFIX} DOMAIN='${DOMAIN}' \
      CERTBOT_EMAIL='${CERTBOT_EMAIL}' \
      CERTBOT_STAGING='${CERTBOT_STAGING}' \
@@ -1096,14 +1144,15 @@ ssh $SSH_OPTS "${SSH_USER}@${IP}" \
      bash /opt/forgejo/deploy.sh"
 
 # ── Verify HTTPS endpoint ─────────────────────────────────────────────────────
-info "Verifying HTTPS endpoint externally at https://${IP} ..."
-HTTPS_HTTP_CODE="$(curl -sk --max-time 15 -o /dev/null -w '%{http_code}' "https://${IP}" || true)"
+_HTTPS_URL="https://${ROOT_URL_HOST}"
+info "Verifying HTTPS endpoint externally at ${_HTTPS_URL} ..."
+HTTPS_HTTP_CODE="$(curl -sk --max-time 15 -o /dev/null -w '%{http_code}' "${_HTTPS_URL}" || true)"
 if [ "$HTTPS_HTTP_CODE" = "200" ] || [ "$HTTPS_HTTP_CODE" = "302" ]; then
     info "External HTTPS check passed (HTTP $HTTPS_HTTP_CODE)."
 else
     warn "External HTTPS check returned code: $HTTPS_HTTP_CODE — running verbose check from VPS:"
     # shellcheck disable=SC2086
-    ssh $SSH_OPTS "${SSH_USER}@${IP}" \
+    ssh $SSH_OPTS "${SSH_USER}@${_SSH_HOST}" \
         "curl -vvv -k --max-time 15 https://localhost 2>&1; echo; echo '--- nginx status ---'; docker ps --filter name=nginx --format '{{.Status}}'; docker exec \$(docker ps -qf name=nginx) nginx -t 2>&1 || true" \
         || true
 fi
@@ -1111,9 +1160,11 @@ fi
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-info "Forgejo is live at https://${IP}  [${PROVIDER}]"
+info "Forgejo is live at ${_HTTPS_URL}  [${PROVIDER} / ${IP_STACK}]"
+[[ -n "$IP"   ]] && echo "  IPv4 : ${IP}"
+[[ -n "$IPV6" ]] && echo "  IPv6 : ${IPV6}"
 echo
-echo "  Admin SSH : ssh deploy@${IP}   (root login disabled after hardening)"
+echo "  Admin SSH : ssh deploy@${_SSH_HOST}   (root login disabled after hardening)"
 echo
 echo "  Forgejo admin credentials:"
 echo "    Username : ${FORGEJO_ADMIN_USER}"
@@ -1126,7 +1177,7 @@ echo "  ── Git SSH config ────────────────�
 echo "  Add to ~/.ssh/config:"
 echo
 echo "    Host forgejo"
-echo "        HostName ${IP}"
+echo "        HostName ${CONNECT_IP}"
 echo "        Port 2222"
 echo "        User git"
 echo "        IdentityFile ~/.ssh/id_ed25519"
@@ -1134,6 +1185,6 @@ echo
 echo "  Then clone with:  git clone git@forgejo:/<user>/<repo>.git"
 echo
 echo "  Or set a git URL alias (no SSH config needed):"
-echo "    git config --global url.\"ssh://git@${IP}:2222/\".insteadOf \"forgejo:\""
+echo "    git config --global url.\"ssh://git@${CONNECT_IP}:2222/\".insteadOf \"forgejo:\""
 echo "  Then clone with:  git clone forgejo:<user>/<repo>"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

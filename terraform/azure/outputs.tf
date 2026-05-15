@@ -1,6 +1,11 @@
 output "public_ipv4" {
-  description = "VM public IP address."
+  description = "VM public IPv4 address (empty string when ip_stack = 'ipv6')."
   value       = module.infra.public_ipv4
+}
+
+output "public_ipv6" {
+  description = "VM public IPv6 address (empty string when ip_stack = 'ipv4')."
+  value       = module.infra.public_ipv6
 }
 
 output "ssh_user" {

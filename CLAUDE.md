@@ -19,6 +19,8 @@ Automates deployment of a [Forgejo](https://forgejo.org/) container instance on 
 ./provision.sh --workspace <name>                         # deploy a second instance in its own Terraform workspace
 ./provision.sh --non-interactive --provider vultr \
     --region ewr --plan vc2-1c-1gb                        # unattended/cron (no interactive prompts)
+./provision.sh --ip-stack dual                            # dual-stack IPv4 + IPv6 (IPv4 used for TLS/SSH)
+./provision.sh --ip-stack ipv6                            # IPv6-only firewall; provisioning and TLS use IPv6
 ```
 
 **Destroy an instance:**
@@ -182,9 +184,32 @@ Active instances = those where the latest event per `(provider, workspace)` has 
 
 `--destroy` reads this log to build the instance picker. If the log is absent or has no entries for the current provider, it falls back to reading `terraform output` from the current workspace.
 
+## IPv6 Support (`--ip-stack`)
+
+All three providers support three IP stack modes via `--ip-stack <mode>`:
+
+| Mode | IPv4 firewall | IPv6 firewall | Provisioning/TLS | Notes |
+|---|---|---|---|---|
+| `ipv4` | open | closed | IPv4 | Default; backwards-compatible |
+| `dual` | open | open | IPv4 | Both addresses in Terraform output |
+| `ipv6` | closed | open | IPv6 | Vultr still assigns an IPv4 address at network layer; firewall blocks it |
+
+### Provider-specific details
+
+- **Vultr**: `enable_ipv6 = true` adds a second IPv6 address. IPv4 is always physically present.
+- **AWS**: `ipv4` mode uses the account's default VPC. `dual`/`ipv6` mode creates a dedicated VPC with an Amazon-provided IPv6 /56, an IGW, and route tables (`::/0` → IGW). The default VPC cannot be assigned an IPv6 CIDR via Terraform.
+- **Azure**: A second `azurerm_public_ip` with `ip_version = "IPv6"` is created. The VNet gains a ULA `/48` (`ace:cab:deca::/48`) and subnet a `/64` (`ace:cab:deca:deed::/64`). NSG `source_address_prefix = "*"` already covers both families. Changing `ip_stack` on an existing Azure deployment requires a destroy+apply because `lifecycle { ignore_changes = [subnet] }` prevents in-place subnet prefix updates.
+
+### DOMAIN and ROOT_URL
+- `DOMAIN` is always a bare IP address (no brackets), used by nginx `server_name` and certbot `--ip-address`.
+- `ROOT_URL_HOST` wraps IPv6 addresses in brackets (`[addr]`) for valid URL syntax (RFC 2732) and is used for `ROOT_URL` in `app.ini`.
+- nginx always listens on both `0.0.0.0:80/443` and `[::]:80/443`; the firewall controls what is actually reachable.
+
 ## TLS / Domain
 
 No DNS setup required. `DOMAIN` is set to the VPS public IP directly (`DOMAIN="$IP"` in `provision.sh`). Let's Encrypt issues an IP certificate using the short-lived profile (`--preferred-profile shortlived`, 160-hour validity). IP certs are required to use this profile. The certbot renewal systemd timer runs every 12 hours to keep it current.
+
+In `ipv6` mode, `DOMAIN` is the IPv6 address. Let's Encrypt supports IPv6 IP SANs under the shortlived profile, but the ACME HTTP-01 validator must be able to reach the server over IPv6 from the public internet.
 
 ## Known Verification Steps
 

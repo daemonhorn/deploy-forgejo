@@ -2,6 +2,7 @@
 # Replaced by nginx.conf.tmpl after cert is obtained.
 server {
     listen 80;
+    listen [::]:80;
     server_name ${DOMAIN};
 
     location /.well-known/acme-challenge/ {
