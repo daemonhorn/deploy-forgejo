@@ -1,0 +1,84 @@
+# Forgejo automated operations — example crontab
+# ─────────────────────────────────────────────────────────────────────────────
+# INSTALL
+#   crontab < crontab.example          # replaces your existing crontab
+#   crontab -e                         # or open the editor and paste/merge
+#
+# PREREQUISITES — run once before enabling the cron jobs:
+#   mkdir -p /var/backups/forgejo      # backup archive destination
+#   chmod 700 /var/backups/forgejo     # restrict: archives contain all repo data
+#   mkdir -p /var/log/forgejo          # cron appends stdout+stderr here
+#
+# ALL TIMES ARE UTC.  The instance is provisioned in ewr (New Jersey);
+# 02:00–06:00 UTC is overnight US-East, a good low-traffic window.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Environment ───────────────────────────────────────────────────────────────
+# cron starts with a nearly empty environment.  Spell out everything the
+# scripts depend on so they behave identically to an interactive shell run.
+
+SHELL=/bin/bash
+
+# Extend PATH to wherever terraform, vault, docker, zstd, and ykman live.
+# Run 'echo $PATH' in your normal login shell and paste the result here.
+PATH=/usr/local/bin:/usr/bin:/bin:/snap/bin
+
+# Set HOME so that ~/.ssh/id_ed25519 (admin SSH key) and ~/.vault.token
+# resolve correctly.  Replace with your actual home directory.
+HOME=/home/dhorn
+
+# Suppress the per-job email cron normally sends on any stdout/stderr output;
+# we redirect each job to a dedicated log file instead.
+# Change to a real address to get email on failure: MAILTO=you@example.com
+MAILTO=""
+
+# ── Twice-daily repository export ────────────────────────────────────────────
+# 03:00 and 15:00 UTC every day.
+#
+# Exports every Forgejo repository (including wikis) to a timestamped
+# zstd-compressed tar archive of bare git bundles.  Each bundle is a complete
+# clone; restore with:
+#   tar -xf forgejo-YYYYMMDD-HHMM.tar.zst
+#   git clone path/to/<owner>/<repo>.bundle  destination/
+#
+# Auto-detection: export-git.sh reads .last-provider to find the right
+# Terraform directory, retrieves the IP from 'terraform output', then SSHes
+# as deploy@ to generate a short-lived admin token — no credentials to embed.
+#
+# Archive rotation: daily-export.sh keeps the 14 most recent archives
+# (7 days at twice-daily cadence) and deletes older ones automatically.
+# Adjust KEEP= inside cron/daily-export.sh to change the retention window.
+#
+# Note: the % character is special in crontab (treated as newline); that is
+# why the date format string lives inside the helper script, not inline here.
+0 3,15 * * *  /home/dhorn/git-deploy/cron/daily-export.sh \
+              >> /var/log/forgejo/export.log 2>&1
+
+# ── Weekly rolling instance rotation ─────────────────────────────────────────
+# 02:00 UTC every Sunday.
+#
+# Provisions a fresh cloud instance, mirrors all repos updated in the past
+# 7 days, verifies the new instance is healthy, then destroys the old instance.
+# The old instance is only destroyed if verification passes — on any failure
+# the old instance stays up untouched and the error is logged.
+#
+# Why rotate weekly?
+#   • Let's Encrypt short-lived IP certs expire in 160 hours (~6.7 days).
+#     Weekly rotation ensures the certbot renewal path is exercised regularly
+#     rather than discovered broken under pressure.
+#   • Forces the full provision + deploy pipeline to run on a schedule,
+#     surfacing Terraform drift, image changes, or cloud-API breakage before
+#     they become an emergency.
+#   • Achieves automatic credential rotation: every week brings a fresh TLS
+#     certificate and a new SSH host key.
+#
+# ROTATE_PROVIDER / ROTATE_REGION / ROTATE_PLAN are read by the script as
+# environment variables.  Inline them here to override per-job without editing
+# the script.  Match them to your current provider's available plans/regions.
+#
+# See cron/weekly-rotate.sh for the full workflow and failure-handling details.
+0 2 * * 0     ROTATE_PROVIDER=vultr \
+              ROTATE_REGION=ewr \
+              ROTATE_PLAN=vc2-1c-0.5gb \
+              /home/dhorn/git-deploy/cron/weekly-rotate.sh \
+              >> /var/log/forgejo/migrate.log 2>&1
