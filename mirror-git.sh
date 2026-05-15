@@ -80,6 +80,9 @@ INCLUDE_WIKIS=true
 INCLUDE_ARCHIVED=true
 INSECURE=false
 SSH_KEY="${ADMIN_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+# Forgejo ≥7.0 requires explicit token scopes; enumerate them rather than relying on
+# the 'all' shorthand, which has been unreliable in some Forgejo 15.x builds.
+_FORGEJO_ADMIN_SCOPES="read:activitypub,write:activitypub,read:admin,write:admin,read:issue,write:issue,read:misc,write:misc,read:notification,write:notification,read:organization,write:organization,read:package,write:package,read:repository,write:repository,read:user,write:user"
 
 # ── CLI arguments ─────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -181,14 +184,31 @@ if [[ -z "$SRC_TOKEN" ]]; then
     SRC_TOKEN="$(ssh $_ssh_opts "deploy@$_src_ip" \
         "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
          generate-access-token --username $_admin_user \
-         --token-name mirror-src-$(date +%s) --scopes all --raw" 2>/dev/null || true)"
+         --token-name mirror-src-$(date +%s) --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
+        2>/dev/null || true)"
+    # Take only the last line in case Forgejo emits log lines before the token.
+    SRC_TOKEN="$(printf '%s\n' "$SRC_TOKEN" | tail -1 | tr -d '[:space:]')"
     [[ -n "$SRC_TOKEN" ]] \
         || error "Could not obtain source admin token. Pass --src-token TOKEN."
     _st="$(curl -sf --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
         -H "Authorization: token $SRC_TOKEN" -o /dev/null -w "%{http_code}" \
         "$SRC_URL/api/v1/user" 2>/dev/null || true)"
-    [[ "$_st" == "200" ]] \
-        || error "Source token validation failed (HTTP $_st). Check admin user and SSH access."
+    if [[ "$_st" != "200" ]]; then
+        if [[ "$_st" == "403" ]]; then
+            warn "Source token validation: HTTP 403 (token accepted but insufficient scope)."
+            warn "  Admin user: $_admin_user   Host: $_src_ip"
+            warn "  Generate a token manually, then re-run with --src-token TOKEN:"
+            warn "    ssh deploy@$_src_ip docker exec -u git forgejo /usr/local/bin/forgejo admin user generate-access-token --username $_admin_user --token-name manual-src --scopes '$_FORGEJO_ADMIN_SCOPES' --raw"
+        elif [[ "$_st" == "401" ]]; then
+            warn "Source token validation: HTTP 401 (token not recognised — may be malformed)."
+            warn "  Admin user: $_admin_user   Host: $_src_ip"
+            warn "  Check that the admin user exists: ssh deploy@$_src_ip docker exec -u git forgejo forgejo admin user list"
+        else
+            warn "Source token validation: HTTP ${_st:-no response}."
+            warn "  Admin user: $_admin_user   Host: $_src_ip"
+        fi
+        error "Source token validation failed (HTTP ${_st:-no response})."
+    fi
     info "Source admin token obtained."
 fi
 
@@ -401,14 +421,31 @@ if [[ -z "$DEST_TOKEN" ]]; then
     DEST_TOKEN="$(ssh $_dst_ssh_opts "deploy@$_dst_host" \
         "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
          generate-access-token --username $_admin_user \
-         --token-name mirror-dst-$(date +%s) --scopes all --raw" 2>/dev/null || true)"
+         --token-name mirror-dst-$(date +%s) --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
+        2>/dev/null || true)"
+    # Take only the last line in case Forgejo emits log lines before the token.
+    DEST_TOKEN="$(printf '%s\n' "$DEST_TOKEN" | tail -1 | tr -d '[:space:]')"
     [[ -n "$DEST_TOKEN" ]] \
         || error "Could not obtain destination admin token. Pass --dest-token TOKEN."
     _dt="$(curl -sf --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
         -H "Authorization: token $DEST_TOKEN" -o /dev/null -w "%{http_code}" \
         "$DEST_URL/api/v1/user" 2>/dev/null || true)"
-    [[ "$_dt" == "200" ]] \
-        || error "Destination token validation failed (HTTP $_dt)."
+    if [[ "$_dt" != "200" ]]; then
+        if [[ "$_dt" == "403" ]]; then
+            warn "Destination token validation: HTTP 403 (token accepted but insufficient scope)."
+            warn "  Admin user: $_admin_user   Host: $_dst_host"
+            warn "  Generate a token manually, then re-run with --dest-token TOKEN:"
+            warn "    ssh deploy@$_dst_host docker exec -u git forgejo /usr/local/bin/forgejo admin user generate-access-token --username $_admin_user --token-name manual-dst --scopes '$_FORGEJO_ADMIN_SCOPES' --raw"
+        elif [[ "$_dt" == "401" ]]; then
+            warn "Destination token validation: HTTP 401 (token not recognised — may be malformed)."
+            warn "  Admin user: $_admin_user   Host: $_dst_host"
+            warn "  Check that the admin user exists: ssh deploy@$_dst_host docker exec -u git forgejo forgejo admin user list"
+        else
+            warn "Destination token validation: HTTP ${_dt:-no response}."
+            warn "  Admin user: $_admin_user   Host: $_dst_host"
+        fi
+        error "Destination token validation failed (HTTP ${_dt:-no response})."
+    fi
     info "Destination admin token obtained."
 fi
 
