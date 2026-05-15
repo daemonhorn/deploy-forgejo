@@ -1,8 +1,13 @@
 # Standard provider contract — all provider modules must emit these exact outputs.
 
 output "public_ipv4" {
-  description = "Instance public IP address."
-  value       = azurerm_public_ip.main.ip_address
+  description = "VM public IPv4 address (empty string when ip_stack = 'ipv6')."
+  value       = var.ip_stack != "ipv6" ? azurerm_public_ip.main.ip_address : ""
+}
+
+output "public_ipv6" {
+  description = "VM public IPv6 address (empty string when ip_stack = 'ipv4')."
+  value       = var.ip_stack != "ipv4" ? azurerm_public_ip.ipv6[0].ip_address : ""
 }
 
 output "ssh_user" {

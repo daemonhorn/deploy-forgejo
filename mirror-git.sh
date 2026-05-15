@@ -130,7 +130,7 @@ $INSECURE && _ssl_flag="--insecure"
 
 # ── Resolve source URL ────────────────────────────────────────────────────────
 if [[ -z "$SRC_URL" ]]; then
-    _src_ip=""
+    _src_ip="" _src_ipv6=""
     if command -v terraform &>/dev/null; then
         _last="${SRC_PROVIDER:-}"
         [[ -z "$_last" && -f "$SCRIPT_DIR/.last-provider" ]] \
@@ -143,11 +143,17 @@ if [[ -z "$SRC_URL" ]]; then
             _src_ip="$(cd "$_dir" && \
                 terraform workspace select "$SRC_WORKSPACE" >/dev/null 2>&1 && \
                 terraform output -raw public_ipv4 2>/dev/null || true)"
-            [[ -n "$_src_ip" ]] && break
+            _src_ipv6="$(cd "$_dir" && terraform output -raw public_ipv6 2>/dev/null || true)"
+            [[ -n "$_src_ip" || -n "$_src_ipv6" ]] && break
         done
     fi
-    [[ -n "$_src_ip" ]] || error "Cannot determine source URL. Pass --src-url URL."
-    SRC_URL="https://${_src_ip}"
+    if [[ -n "$_src_ip" ]]; then
+        SRC_URL="https://${_src_ip}"
+    elif [[ -n "$_src_ipv6" ]]; then
+        SRC_URL="https://[${_src_ipv6}]"
+    else
+        error "Cannot determine source URL. Pass --src-url URL."
+    fi
     info "Source (from Terraform): $SRC_URL"
 fi
 SRC_URL="${SRC_URL%/}"
@@ -341,10 +347,16 @@ if [[ -z "$DEST_URL" ]]; then
         --workspace "$DEST_WORKSPACE"
     _dest_ip="$(cd "$SCRIPT_DIR/terraform/$DEST_PROVIDER" && \
         terraform workspace select "$DEST_WORKSPACE" >/dev/null 2>&1 && \
-        terraform output -raw public_ipv4 2>/dev/null)"
-    [[ -n "$_dest_ip" ]] \
-        || error "Could not read destination IP from Terraform after provisioning."
-    DEST_URL="https://${_dest_ip}"
+        terraform output -raw public_ipv4 2>/dev/null || true)"
+    _dest_ipv6="$(cd "$SCRIPT_DIR/terraform/$DEST_PROVIDER" && \
+        terraform output -raw public_ipv6 2>/dev/null || true)"
+    if [[ -n "$_dest_ip" ]]; then
+        DEST_URL="https://${_dest_ip}"
+    elif [[ -n "$_dest_ipv6" ]]; then
+        DEST_URL="https://[${_dest_ipv6}]"
+    else
+        error "Could not read destination IP from Terraform after provisioning."
+    fi
     info "Destination provisioned: $DEST_URL"
 fi
 DEST_URL="${DEST_URL%/}"
@@ -359,9 +371,12 @@ _dst_host="${DEST_URL#https://}"; _dst_host="${_dst_host#http://}"; _dst_host="$
 _dest_kh="$(mktemp)"
 trap 'rm -f "$_repos_tmp" "$_dest_kh"' EXIT
 
+# ssh-keyscan doesn't accept bracket notation; strip them for bare IPv6 addresses.
+_bare_host() { local h="$1"; h="${h#[}"; h="${h%]}"; echo "$h"; }
+
 info "Scanning destination SSH host key ($_dst_host)..."
 _kh_tries=0
-until ssh-keyscan -T 5 "$_dst_host" >> "$_dest_kh" 2>/dev/null && [[ -s "$_dest_kh" ]]; do
+until ssh-keyscan -T 5 "$(_bare_host "$_dst_host")" >> "$_dest_kh" 2>/dev/null && [[ -s "$_dest_kh" ]]; do
     _kh_tries=$((_kh_tries + 1))
     [[ "$_kh_tries" -lt 12 ]] || error "Timed out waiting for SSH on destination $_dst_host"
     info "  waiting for SSH on destination... (${_kh_tries}/12)"

@@ -18,7 +18,7 @@ ENABLE_PUSH_CREATE_USER = true
 ; ── Server ────────────────────────────────────────────────────────────────────
 [server]
 DOMAIN         = ${DOMAIN}
-ROOT_URL       = https://${DOMAIN}
+ROOT_URL       = https://${ROOT_URL_HOST}
 HTTP_PORT      = 3000
 ; Internal hook calls (e.g. forgejo keys) connect back to Forgejo via this URL.
 ; Must use 127.0.0.1 explicitly — 'localhost' resolves to ::1 (IPv6) which

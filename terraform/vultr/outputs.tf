@@ -1,6 +1,11 @@
 output "public_ipv4" {
-  description = "VPS public IP address."
+  description = "VPS public IPv4 address (empty string when ip_stack = 'ipv6')."
   value       = module.infra.public_ipv4
+}
+
+output "public_ipv6" {
+  description = "VPS public IPv6 address (empty string when ip_stack = 'ipv4')."
+  value       = module.infra.public_ipv6
 }
 
 output "ssh_user" {

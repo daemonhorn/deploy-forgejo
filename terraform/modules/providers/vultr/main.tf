@@ -23,8 +23,9 @@ resource "vultr_firewall_group" "main" {
   description = "${var.hostname} firewall"
 }
 
-resource "vultr_firewall_rule" "inbound" {
-  for_each = toset([for p in var.firewall_ports : tostring(p)])
+# IPv4 ingress rules — omitted in ipv6-only mode so all IPv4 traffic is dropped.
+resource "vultr_firewall_rule" "inbound_v4" {
+  for_each = var.ip_stack != "ipv6" ? toset([for p in var.firewall_ports : tostring(p)]) : toset([])
 
   firewall_group_id = vultr_firewall_group.main.id
   protocol          = "tcp"
@@ -33,6 +34,19 @@ resource "vultr_firewall_rule" "inbound" {
   subnet_size       = 0
   port              = each.value
   notes             = "port ${each.value}"
+}
+
+# IPv6 ingress rules — added in dual and ipv6-only modes.
+resource "vultr_firewall_rule" "inbound_v6" {
+  for_each = var.ip_stack != "ipv4" ? toset([for p in var.firewall_ports : tostring(p)]) : toset([])
+
+  firewall_group_id = vultr_firewall_group.main.id
+  protocol          = "tcp"
+  ip_type           = "v6"
+  subnet            = "::"
+  subnet_size       = 0
+  port              = each.value
+  notes             = "port ${each.value} IPv6"
 }
 
 resource "vultr_instance" "main" {
@@ -44,8 +58,10 @@ resource "vultr_instance" "main" {
   ssh_key_ids       = [vultr_ssh_key.admin.id]
   firewall_group_id = vultr_firewall_group.main.id
 
-  # Enable IPv6 and backups optionally; add variables to expose these if needed.
-  enable_ipv6      = false
-  backups          = "disabled"
-  ddos_protection  = false
+  # Vultr always assigns an IPv4 address; enable_ipv6 adds a second IPv6 address.
+  # In ipv6-only mode the IPv4 address still exists at the network layer but
+  # firewall rules block all IPv4 inbound, so only IPv6 is reachable.
+  enable_ipv6     = var.ip_stack != "ipv4"
+  backups         = "disabled"
+  ddos_protection = false
 }

@@ -28,10 +28,13 @@ resource "time_sleep" "rg_propagation" {
 }
 
 resource "azurerm_virtual_network" "main" {
-  name                = "${var.hostname}-vnet"
-  address_space       = ["10.0.0.0/16"]
-  location            = azurerm_resource_group.main.location
+  name     = "${var.hostname}-vnet"
+  location = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
+
+  # dual/ipv6 mode: add a ULA IPv6 /48; Azure maps private IPv6 addresses from
+  # this range to the public IPv6 address on the Standard SKU public IP resource.
+  address_space = var.ip_stack != "ipv4" ? ["10.0.0.0/16", "ace:cab:deca::/48"] : ["10.0.0.0/16"]
 
   # Inline subnet avoids the eventual-consistency race where the VNet creation
   # API returns 200 but the resource isn't yet visible when a separate
@@ -39,25 +42,42 @@ resource "azurerm_virtual_network" "main" {
   # The NSG is associated here so VNet destruction atomically removes the
   # subnet + its NSG link before the NSG delete runs — no ordering race.
   subnet {
-    name             = "${var.hostname}-subnet"
-    address_prefixes = ["10.0.1.0/24"]
-    security_group   = azurerm_network_security_group.main.id
+    name           = "${var.hostname}-subnet"
+    address_prefixes = var.ip_stack != "ipv4" ? ["10.0.1.0/24", "ace:cab:deca:deed::/64"] : ["10.0.1.0/24"]
+    security_group = azurerm_network_security_group.main.id
   }
 
   # Azure may back-fill subnet defaults on subsequent reads; ignore to prevent
   # spurious drift on `terraform plan` after the initial apply.
+  # NOTE: changing ip_stack on an existing deployment requires destroy+apply
+  # because this lifecycle block prevents in-place subnet prefix updates.
   lifecycle {
     ignore_changes = [subnet]
   }
 }
 
-# Static public IP so the Let's Encrypt IP certificate stays valid across reboots.
+# Static public IPv4 so the Let's Encrypt IP certificate stays valid across reboots.
 resource "azurerm_public_ip" "main" {
   name                = "${var.hostname}-ip"
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
   allocation_method   = "Static"
   sku                 = "Standard"
+  ip_version          = "IPv4"
+  depends_on          = [time_sleep.rg_propagation]
+}
+
+# Static public IPv6 — only created in dual and ipv6-only modes.
+# Standard SKU public IPs support only one IP family per resource, so a
+# separate resource is required alongside the IPv4 public IP.
+resource "azurerm_public_ip" "ipv6" {
+  count               = var.ip_stack != "ipv4" ? 1 : 0
+  name                = "${var.hostname}-ip6"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+  ip_version          = "IPv6"
   depends_on          = [time_sleep.rg_propagation]
 }
 
@@ -100,6 +120,8 @@ resource "azurerm_network_security_group" "main" {
   resource_group_name = azurerm_resource_group.main.name
   depends_on          = [time_sleep.rg_propagation]
 
+  # source_address_prefix = "*" matches any source including IPv6, so no
+  # separate IPv6 rules are needed — NSG rules apply to both address families.
   dynamic "security_rule" {
     for_each = local.firewall_rules
     content {
@@ -125,7 +147,21 @@ resource "azurerm_network_interface" "main" {
     name                          = "main"
     subnet_id                     = local.subnet_id
     private_ip_address_allocation = "Dynamic"
+    private_ip_address_version    = "IPv4"
     public_ip_address_id          = azurerm_public_ip.main.id
+    # primary must be true when multiple ip_configuration blocks are present.
+    primary = true
+  }
+
+  dynamic "ip_configuration" {
+    for_each = var.ip_stack != "ipv4" ? [1] : []
+    content {
+      name                          = "ipv6"
+      subnet_id                     = local.subnet_id
+      private_ip_address_allocation = "Dynamic"
+      private_ip_address_version    = "IPv6"
+      public_ip_address_id          = azurerm_public_ip.ipv6[0].id
+    }
   }
 }
 

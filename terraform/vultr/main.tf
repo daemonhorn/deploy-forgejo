@@ -27,4 +27,5 @@ module "infra" {
   plan           = var.plan
   hostname       = var.hostname
   firewall_ports = var.firewall_ports
+  ip_stack       = var.ip_stack
 }

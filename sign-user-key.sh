@@ -65,14 +65,21 @@ resolve_forgejo_credentials() {
             local _tf_dirs=("$SCRIPT_DIR/terraform/vultr")
             [[ -n "$_last_provider" ]] && \
                 _tf_dirs=("$SCRIPT_DIR/terraform/$_last_provider" "$SCRIPT_DIR/terraform/vultr")
+            local _ipv6=""
             for _dir in "${_tf_dirs[@]}"; do
                 [[ -d "$_dir" ]] || continue
                 _ip="$(cd "$_dir" && terraform output -raw public_ipv4 2>/dev/null || true)"
-                [[ -n "$_ip" ]] && break
+                _ipv6="$(cd "$_dir" && terraform output -raw public_ipv6 2>/dev/null || true)"
+                [[ -n "$_ip" || -n "$_ipv6" ]] && break
             done
         fi
-        [[ -n "$_ip" ]] || error "Cannot determine Forgejo URL. Pass --forgejo-url URL or set FORGEJO_URL."
-        FORGEJO_URL="https://${_ip}"
+        if [[ -n "$_ip" ]]; then
+            FORGEJO_URL="https://${_ip}"
+        elif [[ -n "$_ipv6" ]]; then
+            FORGEJO_URL="https://[${_ipv6}]"
+        else
+            error "Cannot determine Forgejo URL. Pass --forgejo-url URL or set FORGEJO_URL."
+        fi
         info "Forgejo URL (from Terraform): $FORGEJO_URL"
     fi
 
