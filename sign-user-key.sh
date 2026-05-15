@@ -62,9 +62,9 @@ resolve_forgejo_credentials() {
             # Try last-used provider's terraform dir first
             local _last_provider=""
             [[ -f "$SCRIPT_DIR/.last-provider" ]] && _last_provider="$(cat "$SCRIPT_DIR/.last-provider" | tr -d '[:space:]')"
-            local _tf_dirs=("$SCRIPT_DIR/terraform")
-            [[ "$_last_provider" == "aws" || "$_last_provider" == "azure" ]] && \
-                _tf_dirs=("$SCRIPT_DIR/terraform/$_last_provider" "$SCRIPT_DIR/terraform")
+            local _tf_dirs=("$SCRIPT_DIR/terraform/vultr")
+            [[ -n "$_last_provider" ]] && \
+                _tf_dirs=("$SCRIPT_DIR/terraform/$_last_provider" "$SCRIPT_DIR/terraform/vultr")
             for _dir in "${_tf_dirs[@]}"; do
                 [[ -d "$_dir" ]] || continue
                 _ip="$(cd "$_dir" && terraform output -raw public_ipv4 2>/dev/null || true)"

@@ -352,6 +352,7 @@ PY
 CERTBOT_STAGING=""
 PROVIDER=""
 FORCE_REFRESH=false
+DESTROY=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -366,8 +367,11 @@ while [[ $# -gt 0 ]]; do
         --refresh)
             FORCE_REFRESH=true
             shift ;;
+        --destroy)
+            DESTROY=true
+            shift ;;
         *)
-            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--debug]" ;;
+            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--debug]" ;;
     esac
 done
 
@@ -380,9 +384,6 @@ if [[ -z "$PROVIDER" ]]; then
     DEFAULT_PROVIDER="vultr"
     if [[ -f .last-provider ]]; then
         DEFAULT_PROVIDER="$(cat .last-provider | tr -d '[:space:]')"
-    elif grep -q 'provider_name' terraform/terraform.tfvars 2>/dev/null; then
-        _p="$(grep 'provider_name' terraform/terraform.tfvars | sed 's/.*=\s*"\(.*\)".*/\1/')"
-        [[ -n "$_p" ]] && DEFAULT_PROVIDER="$_p"
     fi
 
     read -rp "[provision] Cloud provider (vultr/aws/azure) [${DEFAULT_PROVIDER}]: " _prov
@@ -462,7 +463,7 @@ export TF_VAR_admin_ssh_public_key="$ADMIN_SSH_PUBLIC_KEY"
 case "$PROVIDER" in
     vultr)
         export TF_VAR_vultr_api_key="$(vget vultr_api_key secret/forgejo/cloud)"
-        TF_DIR="$SCRIPT_DIR/terraform"
+        TF_DIR="$SCRIPT_DIR/terraform/vultr"
         ;;
     aws)
         [ -f aws_access_key ]        || error "aws_access_key file not found in $SCRIPT_DIR"
@@ -519,6 +520,24 @@ PY
         TF_DIR="$SCRIPT_DIR/terraform/azure"
         ;;
 esac
+
+# ── Destroy mode (early exit before region/plan/deploy) ───────────────────────
+if $DESTROY; then
+    [[ -f "${TF_DIR}/terraform.tfvars" ]] \
+        || error "No terraform.tfvars at ${TF_DIR}/terraform.tfvars — has '$PROVIDER' been provisioned yet?"
+    cd "$TF_DIR"
+    # Init without -upgrade so the state's locked provider versions are used.
+    terraform init -input=false >/dev/null
+    _existing_ip="$(terraform output -raw public_ipv4 2>/dev/null || echo "unknown")"
+    warn "This will permanently destroy all $PROVIDER infrastructure for Forgejo (IP: ${_existing_ip})."
+    read -rp "[provision] Type 'yes' to confirm destroy: " _confirm
+    [[ "$_confirm" == "yes" ]] || error "Destroy cancelled."
+    info "Destroying $PROVIDER infrastructure (IP: ${_existing_ip})..."
+    terraform destroy -auto-approve -input=false
+    cd "$SCRIPT_DIR"
+    info "Destroy complete. Run ./provision.sh to redeploy."
+    exit 0
+fi
 
 # ── Region & plan selection ───────────────────────────────────────────────────
 CURRENT_REGION="$(tfvars_get "${TF_DIR}/terraform.tfvars" region)"

@@ -1,9 +1,3 @@
-variable "provider_name" {
-  description = "Cloud provider to use. Selects the provider module under modules/providers/."
-  type        = string
-  default     = "vultr"
-}
-
 variable "vultr_api_key" {
   description = "Vultr API key. Supply via TF_VAR_vultr_api_key env var; never commit to tfvars."
   type        = string

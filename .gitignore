@@ -22,6 +22,10 @@ ca_public.pem
 .terraform.lock.hcl
 terraform/aws/.terraform/
 terraform/aws/.terraform.lock.hcl
+terraform/azure/.terraform/
+terraform/azure/.terraform.lock.hcl
+terraform/vultr/.terraform/
+terraform/vultr/.terraform.lock.hcl
 
 # Provider selection state
 .last-provider

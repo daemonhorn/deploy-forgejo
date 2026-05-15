@@ -31,7 +31,7 @@ Automates deployment of a [Forgejo](https://forgejo.org/) container instance on 
 - **Inputs**: `ssh_public_key`, `region`, `plan`, `hostname`, `firewall_ports`
 - **Outputs**: `public_ipv4`, `ssh_user`, `instance_id`
 
-`terraform/main.tf` selects a module via `var.provider_name` (default `"vultr"`). Adding a new provider = new module directory + new `terraform/<name>/` root; no other files change.
+Each provider has a dedicated Terraform root under `terraform/<name>/`. Adding a new provider = new module directory + new `terraform/<name>/` root; no other files change.
 
 ### Secret Flow
 
@@ -100,7 +100,7 @@ Before running `setup.sh`:
 - `.vault.token`, `.vault-keys`, `.vault-data/`: gitignored; the unseal key in `.vault-keys` must be backed up — loss means Vault cannot be unsealed after reboot
 - `ca_public.pem`: gitignored (regenerate from Yubikey anytime: `ykman piv keys export 9d ca_public.pem`)
 - `ca.pub`: **committed** — it's the CA public key, deployed to VPS
-- Terraform state (`terraform/*.tfstate`): gitignored; no secrets (DB password is Vault-owned)
+- Terraform state (`terraform/<provider>/*.tfstate`): gitignored; no secrets (DB password is Vault-owned)
 - VPS: `/opt/forgejo/.env` and `app.ini` chmod 600; contain DB password at rest
 
 ## Adding a New Cloud Provider
@@ -116,7 +116,7 @@ Before running `setup.sh`:
 
 | Provider | Credentials file | Terraform root | Default plan |
 |---|---|---|---|
-| `vultr` | `vultr_api_key` | `terraform/` | `vc2-1c-0.5gb` |
+| `vultr` | `vultr_api_key` | `terraform/vultr/` | `vc2-1c-0.5gb` |
 | `aws` | `aws_access_key` + `aws_secret_access_key` | `terraform/aws/` | `t3.micro` |
 | `azure` | `azure_credentials` (JSON) | `terraform/azure/` | `Standard_B1s` |
 
