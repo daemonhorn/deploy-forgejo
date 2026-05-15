@@ -929,7 +929,6 @@ info "Selected: region=${REGION}  plan=${PLAN}"
 case "$PROVIDER" in
     vultr)
         cat > "$_ws_tfvars" <<EOF
-provider_name = "vultr"
 region        = "${REGION}"
 plan          = "${PLAN}"
 hostname      = "${HOSTNAME}"
