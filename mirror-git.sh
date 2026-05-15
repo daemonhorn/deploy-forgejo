@@ -175,7 +175,7 @@ if [[ -z "$SRC_TOKEN" ]]; then
     SRC_TOKEN="$(ssh $_ssh_opts "deploy@$_src_ip" \
         "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
          generate-access-token --username $_admin_user \
-         --token-name mirror-src-$(date +%s) --raw 2>&1" 2>/dev/null || true)"
+         --token-name mirror-src-$(date +%s) --scopes all --raw" 2>/dev/null || true)"
     [[ -n "$SRC_TOKEN" ]] \
         || error "Could not obtain source admin token. Pass --src-token TOKEN."
     _st="$(curl -sf --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
@@ -386,7 +386,7 @@ if [[ -z "$DEST_TOKEN" ]]; then
     DEST_TOKEN="$(ssh $_dst_ssh_opts "deploy@$_dst_host" \
         "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
          generate-access-token --username $_admin_user \
-         --token-name mirror-dst-$(date +%s) --raw 2>&1" 2>/dev/null || true)"
+         --token-name mirror-dst-$(date +%s) --scopes all --raw" 2>/dev/null || true)"
     [[ -n "$DEST_TOKEN" ]] \
         || error "Could not obtain destination admin token. Pass --dest-token TOKEN."
     _dt="$(curl -sf --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
