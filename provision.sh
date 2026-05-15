@@ -353,6 +353,13 @@ CERTBOT_STAGING=""
 PROVIDER=""
 FORCE_REFRESH=false
 DESTROY=false
+WORKSPACE="default"
+NON_INTERACTIVE=false
+REGION_ARG=""
+PLAN_ARG=""
+DESTROY_IP=""
+DESTROY_ALL=false
+LOG_FILE="${SCRIPT_DIR}/.provision-log.json"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -370,8 +377,24 @@ while [[ $# -gt 0 ]]; do
         --destroy)
             DESTROY=true
             shift ;;
+        --destroy-ip)
+            [[ $# -ge 2 ]] || error "--destroy-ip requires an IP address"
+            DESTROY_IP="$2"; DESTROY=true; shift 2 ;;
+        --destroy-all)
+            DESTROY_ALL=true; DESTROY=true; shift ;;
+        --workspace)
+            [[ $# -ge 2 ]] || error "--workspace requires a value"
+            WORKSPACE="$2"; shift 2 ;;
+        --non-interactive)
+            NON_INTERACTIVE=true; shift ;;
+        --region)
+            [[ $# -ge 2 ]] || error "--region requires a value"
+            REGION_ARG="$2"; shift 2 ;;
+        --plan)
+            [[ $# -ge 2 ]] || error "--plan requires a value"
+            PLAN_ARG="$2"; shift 2 ;;
         *)
-            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--debug]" ;;
+            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--debug]" ;;
     esac
 done
 
@@ -381,6 +404,9 @@ fi
 
 # If not specified, default to last used provider (or prompt)
 if [[ -z "$PROVIDER" ]]; then
+    if $NON_INTERACTIVE; then
+        error "--non-interactive requires --provider <vultr|aws|azure>"
+    fi
     DEFAULT_PROVIDER="vultr"
     if [[ -f .last-provider ]]; then
         DEFAULT_PROVIDER="$(cat .last-provider | tr -d '[:space:]')"
@@ -521,27 +547,185 @@ PY
         ;;
 esac
 
+# ── Workspace, hostname, and workspace-specific tfvars ────────────────────────
+if [[ "$WORKSPACE" == "default" ]]; then
+    HOSTNAME="forgejo"
+    _ws_tfvars="${TF_DIR}/terraform.tfvars"
+else
+    HOSTNAME="forgejo-${WORKSPACE}"
+    _ws_tfvars="${TF_DIR}/terraform.${WORKSPACE}.tfvars"
+fi
+
+# ── Provision log helpers ──────────────────────────────────────────────────────
+_log_event() { printf '%s\n' "$1" >> "$LOG_FILE"; }
+
+# Returns JSON array of active instances for the current provider.
+# Active = latest event per (provider, workspace) has action="provision".
+_active_instances_json() {
+    [[ -f "$LOG_FILE" ]] || { echo "[]"; return; }
+    python3 - "$LOG_FILE" "$PROVIDER" <<'PY'
+import json, sys
+log_file, provider = sys.argv[1], sys.argv[2]
+latest = {}
+with open(log_file) as f:
+    for line in f:
+        line = line.strip()
+        if not line: continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if rec.get("provider") != provider: continue
+        ws = rec.get("workspace", "default")
+        ts = rec.get("ts", "")
+        if ws not in latest or ts > latest[ws]["ts"]:
+            latest[ws] = rec
+active = [r for r in latest.values() if r.get("action") == "provision"]
+print(json.dumps(active))
+PY
+}
+
+# Destroy a single Terraform workspace (init + select + destroy + workspace delete + log).
+_destroy_workspace() {
+    local ws="$1" ip="$2" confirmed ts destroy_args wsfile
+
+    if [[ "$ws" == "default" ]]; then
+        wsfile="${TF_DIR}/terraform.tfvars"
+    else
+        wsfile="${TF_DIR}/terraform.${ws}.tfvars"
+    fi
+
+    warn "This will permanently destroy $PROVIDER infrastructure for workspace '${ws}' (IP: ${ip})."
+    if ! $NON_INTERACTIVE; then
+        read -rp "[provision] Type 'yes' to confirm: " confirmed
+        [[ "$confirmed" == "yes" ]] || { warn "Skipped workspace '${ws}'."; return 0; }
+    fi
+
+    cd "$TF_DIR"
+    terraform init -input=false >/dev/null
+    if ! terraform workspace select "$ws" 2>/dev/null; then
+        warn "Workspace '${ws}' not found in Terraform state; skipping."
+        cd "$SCRIPT_DIR"
+        return 0
+    fi
+
+    info "Destroying $PROVIDER infrastructure for workspace '${ws}' (IP: ${ip})..."
+    destroy_args=(-auto-approve -input=false)
+    [[ "$ws" != "default" && -f "$wsfile" ]] && destroy_args+=(-var-file="$wsfile")
+    terraform destroy "${destroy_args[@]}"
+
+    # Write log entry before workspace delete so the record exists even if delete fails.
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    _log_event "$(printf '{"action":"destroy","ts":"%s","provider":"%s","workspace":"%s","ip":"%s","region":"","plan":""}' \
+        "$ts" "$PROVIDER" "$ws" "$ip")"
+
+    if [[ "$ws" != "default" ]]; then
+        terraform workspace select default 2>/dev/null || true
+        terraform workspace delete "$ws" 2>/dev/null \
+            || warn "Could not delete Terraform workspace '${ws}' — manual cleanup: terraform -chdir=${TF_DIR} workspace delete ${ws}"
+        rm -f "$wsfile"
+    fi
+
+    cd "$SCRIPT_DIR"
+    info "Destroy complete for workspace '${ws}'."
+}
+
 # ── Destroy mode (early exit before region/plan/deploy) ───────────────────────
 if $DESTROY; then
-    [[ -f "${TF_DIR}/terraform.tfvars" ]] \
-        || error "No terraform.tfvars at ${TF_DIR}/terraform.tfvars — has '$PROVIDER' been provisioned yet?"
-    cd "$TF_DIR"
-    # Init without -upgrade so the state's locked provider versions are used.
-    terraform init -input=false >/dev/null
-    _existing_ip="$(terraform output -raw public_ipv4 2>/dev/null || echo "unknown")"
-    warn "This will permanently destroy all $PROVIDER infrastructure for Forgejo (IP: ${_existing_ip})."
-    read -rp "[provision] Type 'yes' to confirm destroy: " _confirm
-    [[ "$_confirm" == "yes" ]] || error "Destroy cancelled."
-    info "Destroying $PROVIDER infrastructure (IP: ${_existing_ip})..."
-    terraform destroy -auto-approve -input=false
-    cd "$SCRIPT_DIR"
-    info "Destroy complete. Run ./provision.sh to redeploy."
+    _instances_json="$(_active_instances_json)"
+    _instance_count="$(python3 -c "import json,sys; print(len(json.loads(sys.argv[1])))" "$_instances_json" 2>/dev/null || echo 0)"
+
+    if $DESTROY_ALL; then
+        if [[ "$_instance_count" -eq 0 ]]; then
+            warn "No active $PROVIDER instances in provision log; attempting current workspace."
+            cd "$TF_DIR"; terraform init -input=false >/dev/null
+            _existing_ip="$(terraform output -raw public_ipv4 2>/dev/null || echo "unknown")"; cd "$SCRIPT_DIR"
+            _destroy_workspace "$WORKSPACE" "$_existing_ip"
+        else
+            info "Destroying all active $PROVIDER instances:"
+            python3 -c "
+import json, sys
+for r in json.loads(sys.argv[1]):
+    print('  workspace={:<20} ip={:<16} region={:<15} plan={}'.format(
+        r.get('workspace','default'), r.get('ip','unknown'),
+        r.get('region',''), r.get('plan','')))
+" "$_instances_json"
+            while IFS= read -r _rec; do
+                _ws="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('workspace','default'))" "$_rec")"
+                _ip="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip','unknown'))" "$_rec")"
+                _destroy_workspace "$_ws" "$_ip"
+            done < <(python3 -c "import json,sys; [print(json.dumps(r)) for r in json.loads(sys.argv[1])]" "$_instances_json")
+        fi
+        info "All destroy operations complete."
+        exit 0
+    fi
+
+    if [[ -n "$DESTROY_IP" ]]; then
+        _target="$(python3 -c "
+import json, sys
+recs = json.loads(sys.argv[1])
+matches = [r for r in recs if r.get('ip') == sys.argv[2]]
+print(json.dumps(matches[0]) if matches else '')
+" "$_instances_json" "$DESTROY_IP")"
+        if [[ -z "$_target" ]]; then
+            warn "IP ${DESTROY_IP} not found in provision log; attempting destroy of workspace '${WORKSPACE}'."
+            _destroy_workspace "$WORKSPACE" "$DESTROY_IP"
+        else
+            _ws="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('workspace','default'))" "$_target")"
+            _destroy_workspace "$_ws" "$DESTROY_IP"
+        fi
+        exit 0
+    fi
+
+    # Plain --destroy: if user named an explicit workspace, use it; otherwise
+    # show picker when multiple instances exist (interactive only).
+    if [[ "$WORKSPACE" != "default" ]]; then
+        # Explicit workspace targeted via --workspace
+        _target_ip="$(python3 -c "
+import json, sys
+recs = json.loads(sys.argv[1])
+matches = [r for r in recs if r.get('workspace') == sys.argv[2]]
+print(matches[0].get('ip','unknown') if matches else 'unknown')
+" "$_instances_json" "$WORKSPACE")"
+        _destroy_workspace "$WORKSPACE" "$_target_ip"
+    elif [[ "$_instance_count" -gt 1 ]] && ! $NON_INTERACTIVE; then
+        info "Multiple active $PROVIDER instances — select one to destroy:"
+        _ws_list=(); _ip_list=(); _i=1
+        while IFS= read -r _rec; do
+            _ws="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('workspace','default'))" "$_rec")"
+            _ip="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip','unknown'))" "$_rec")"
+            _region="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('region',''))" "$_rec")"
+            _plan="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('plan',''))" "$_rec")"
+            printf "  %d) workspace=%-20s ip=%-16s region=%-15s plan=%s\n" \
+                "$_i" "$_ws" "$_ip" "$_region" "$_plan"
+            _ws_list+=("$_ws"); _ip_list+=("$_ip")
+            _i=$((_i + 1))
+        done < <(python3 -c "import json,sys; [print(json.dumps(r)) for r in json.loads(sys.argv[1])]" "$_instances_json")
+        read -rp "[provision] Enter number to destroy (1-$((_i-1))): " _choice
+        [[ "$_choice" =~ ^[0-9]+$ && "$_choice" -ge 1 && "$_choice" -le $((_i-1)) ]] \
+            || error "Invalid selection: $_choice"
+        _idx=$((_choice - 1))
+        _destroy_workspace "${_ws_list[$_idx]}" "${_ip_list[$_idx]}"
+    else
+        # Single instance, no log, or non-interactive: destroy current workspace.
+        if [[ "$_instance_count" -eq 0 ]]; then
+            [[ -f "${TF_DIR}/terraform.tfvars" ]] \
+                || error "No terraform.tfvars at ${TF_DIR}/terraform.tfvars — has '$PROVIDER' been provisioned yet?"
+        fi
+        cd "$TF_DIR"; terraform init -input=false >/dev/null
+        _existing_ip="$(terraform output -raw public_ipv4 2>/dev/null || echo "unknown")"; cd "$SCRIPT_DIR"
+        _destroy_workspace "$WORKSPACE" "$_existing_ip"
+    fi
+
     exit 0
 fi
 
 # ── Region & plan selection ───────────────────────────────────────────────────
-CURRENT_REGION="$(tfvars_get "${TF_DIR}/terraform.tfvars" region)"
-CURRENT_PLAN="$(tfvars_get "${TF_DIR}/terraform.tfvars" plan)"
+# Prefer workspace-specific tfvars; fall back to default terraform.tfvars.
+_tfvars_for_read="$_ws_tfvars"
+[[ -f "$_tfvars_for_read" ]] || _tfvars_for_read="${TF_DIR}/terraform.tfvars"
+CURRENT_REGION="$(tfvars_get "$_tfvars_for_read" region)"
+CURRENT_PLAN="$(tfvars_get "$_tfvars_for_read" plan)"
 
 mkdir -p "$CACHE_DIR"
 
@@ -589,12 +773,18 @@ case "$PROVIDER" in
             )
         fi
 
-        show_menu "Vultr regions ($(cache_age_str "$REG_CACHE"); verify at vultr.com/features/datacenter-locations/):" \
-            "$CURRENT_REGION" "${REGIONS[@]}"
-        REGION="$_MENU_RESULT"
-        show_menu "Vultr instance plans ($(cache_age_str "$PLAN_CACHE"); verify at vultr.com/pricing/):" \
-            "$CURRENT_PLAN" "${PLANS[@]}"
-        PLAN="$_MENU_RESULT"
+        if $NON_INTERACTIVE; then
+            [[ -n "$REGION_ARG" ]] || error "--non-interactive requires --region for vultr"
+            [[ -n "$PLAN_ARG"   ]] || error "--non-interactive requires --plan for vultr"
+            REGION="$REGION_ARG"; PLAN="$PLAN_ARG"
+        else
+            show_menu "Vultr regions ($(cache_age_str "$REG_CACHE"); verify at vultr.com/features/datacenter-locations/):" \
+                "$CURRENT_REGION" "${REGIONS[@]}"
+            REGION="$_MENU_RESULT"
+            show_menu "Vultr instance plans ($(cache_age_str "$PLAN_CACHE"); verify at vultr.com/pricing/):" \
+                "$CURRENT_PLAN" "${PLANS[@]}"
+            PLAN="$_MENU_RESULT"
+        fi
         ;;
     aws)
         [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="us-east-1"
@@ -623,34 +813,40 @@ case "$PROVIDER" in
             )
         fi
 
-        show_menu "AWS regions ($(cache_age_str "$REG_CACHE"); see aws.amazon.com/ec2/pricing/):" \
-            "$CURRENT_REGION" "${REGIONS[@]}"
-        REGION="$_MENU_RESULT"
+        if $NON_INTERACTIVE; then
+            [[ -n "$REGION_ARG" ]] || error "--non-interactive requires --region for aws"
+            [[ -n "$PLAN_ARG"   ]] || error "--non-interactive requires --plan for aws"
+            REGION="$REGION_ARG"; PLAN="$PLAN_ARG"
+        else
+            show_menu "AWS regions ($(cache_age_str "$REG_CACHE"); see aws.amazon.com/ec2/pricing/):" \
+                "$CURRENT_REGION" "${REGIONS[@]}"
+            REGION="$_MENU_RESULT"
 
-        # Fetch instance availability for the selected region (keyed per-region)
-        PLAN_CACHE="$CACHE_DIR/aws-plans-${REGION}.json"
-        if $FORCE_REFRESH || ! cache_fresh "$PLAN_CACHE"; then fetch_aws_plans "$REGION" || true; fi
+            # Fetch instance availability for the selected region (keyed per-region)
+            PLAN_CACHE="$CACHE_DIR/aws-plans-${REGION}.json"
+            if $FORCE_REFRESH || ! cache_fresh "$PLAN_CACHE"; then fetch_aws_plans "$REGION" || true; fi
 
-        PLANS=()
-        [[ -f "$PLAN_CACHE" ]] && load_cache_items PLANS "$PLAN_CACHE"
-        if [[ ${#PLANS[@]} -eq 0 ]]; then
-            warn "Could not verify instance availability in ${REGION}; showing all types (some may be unavailable)."
-            PLANS=(
-                "t4g.micro:2C ARM/1GB    ~\$6/mo   (cheapest; Graviton ARM architecture)"
-                "t3a.micro:2C AMD/1GB    ~\$7/mo"
-                "t3.micro:2C Intel/1GB   ~\$8/mo   (free-tier eligible)"
-                "t3.small:2C Intel/2GB   ~\$15/mo"
-                "t3.medium:2C Intel/4GB  ~\$30/mo"
-            )
+            PLANS=()
+            [[ -f "$PLAN_CACHE" ]] && load_cache_items PLANS "$PLAN_CACHE"
+            if [[ ${#PLANS[@]} -eq 0 ]]; then
+                warn "Could not verify instance availability in ${REGION}; showing all types (some may be unavailable)."
+                PLANS=(
+                    "t4g.micro:2C ARM/1GB    ~\$6/mo   (cheapest; Graviton ARM architecture)"
+                    "t3a.micro:2C AMD/1GB    ~\$7/mo"
+                    "t3.micro:2C Intel/1GB   ~\$8/mo   (free-tier eligible)"
+                    "t3.small:2C Intel/2GB   ~\$15/mo"
+                    "t3.medium:2C Intel/4GB  ~\$30/mo"
+                )
+            fi
+            # Reset default if prior plan is not available in the new region
+            _plan_ok=false
+            for _p in "${PLANS[@]}"; do [[ "${_p%%:*}" == "$CURRENT_PLAN" ]] && { _plan_ok=true; break; }; done
+            $_plan_ok || CURRENT_PLAN="${PLANS[0]%%:*}"
+
+            show_menu "AWS EC2 instance types available in ${REGION} ($(cache_age_str "$PLAN_CACHE"); pricing approx):" \
+                "$CURRENT_PLAN" "${PLANS[@]}"
+            PLAN="$_MENU_RESULT"
         fi
-        # Reset default if prior plan is not available in the new region
-        _plan_ok=false
-        for _p in "${PLANS[@]}"; do [[ "${_p%%:*}" == "$CURRENT_PLAN" ]] && { _plan_ok=true; break; }; done
-        $_plan_ok || CURRENT_PLAN="${PLANS[0]%%:*}"
-
-        show_menu "AWS EC2 instance types available in ${REGION} ($(cache_age_str "$PLAN_CACHE"); pricing approx):" \
-            "$CURRENT_PLAN" "${PLANS[@]}"
-        PLAN="$_MENU_RESULT"
         ;;
     azure)
         [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="eastus"
@@ -676,50 +872,56 @@ case "$PROVIDER" in
             "brazilsouth:Brazil South - Sao Paulo"
         )
 
-        show_menu "Azure regions (static; see azure.microsoft.com/pricing/details/virtual-machines/linux/):" \
-            "$CURRENT_REGION" "${REGIONS[@]}"
-        REGION="$_MENU_RESULT"
+        if $NON_INTERACTIVE; then
+            [[ -n "$REGION_ARG" ]] || error "--non-interactive requires --region for azure"
+            [[ -n "$PLAN_ARG"   ]] || error "--non-interactive requires --plan for azure"
+            REGION="$REGION_ARG"; PLAN="$PLAN_ARG"
+        else
+            show_menu "Azure regions (static; see azure.microsoft.com/pricing/details/virtual-machines/linux/):" \
+                "$CURRENT_REGION" "${REGIONS[@]}"
+            REGION="$_MENU_RESULT"
 
-        # Fetch available VM sizes and region-specific pricing (authenticated, keyed per-region)
-        PLAN_CACHE="$CACHE_DIR/azure-plans-${REGION}.json"
-        if $FORCE_REFRESH || ! cache_fresh "$PLAN_CACHE"; then fetch_azure_plans "$REGION" || true; fi
+            # Fetch available VM sizes and region-specific pricing (authenticated, keyed per-region)
+            PLAN_CACHE="$CACHE_DIR/azure-plans-${REGION}.json"
+            if $FORCE_REFRESH || ! cache_fresh "$PLAN_CACHE"; then fetch_azure_plans "$REGION" || true; fi
 
-        PLANS=()
-        [[ -f "$PLAN_CACHE" ]] && load_cache_items PLANS "$PLAN_CACHE"
-        [[ ${#PLANS[@]} -gt 0 ]] \
-            || error "No Azure VM sizes retrieved for ${REGION}. Ensure 'az' is logged in and retry with --refresh."
-        # Reset default if prior plan is not available in the new region
-        _plan_ok=false
-        for _p in "${PLANS[@]}"; do [[ "${_p%%:*}" == "$CURRENT_PLAN" ]] && { _plan_ok=true; break; }; done
-        $_plan_ok || CURRENT_PLAN="${PLANS[0]%%:*}"
+            PLANS=()
+            [[ -f "$PLAN_CACHE" ]] && load_cache_items PLANS "$PLAN_CACHE"
+            [[ ${#PLANS[@]} -gt 0 ]] \
+                || error "No Azure VM sizes retrieved for ${REGION}. Ensure 'az' is logged in and retry with --refresh."
+            # Reset default if prior plan is not available in the new region
+            _plan_ok=false
+            for _p in "${PLANS[@]}"; do [[ "${_p%%:*}" == "$CURRENT_PLAN" ]] && { _plan_ok=true; break; }; done
+            $_plan_ok || CURRENT_PLAN="${PLANS[0]%%:*}"
 
-        show_menu "Azure VM sizes available in ${REGION} - B-series burstable ($(cache_age_str "$PLAN_CACHE"); capacity limits not checkable in advance — try another size/region if SkuNotAvailable):" \
-            "$CURRENT_PLAN" "${PLANS[@]}"
-        PLAN="$_MENU_RESULT"
+            show_menu "Azure VM sizes available in ${REGION} - B-series burstable ($(cache_age_str "$PLAN_CACHE"); capacity limits not checkable in advance — try another size/region if SkuNotAvailable):" \
+                "$CURRENT_PLAN" "${PLANS[@]}"
+            PLAN="$_MENU_RESULT"
+        fi
         ;;
 esac
 
 info "Selected: region=${REGION}  plan=${PLAN}"
 
-# Write provider-specific terraform.tfvars (always; overwrites previous values)
+# Write provider-specific tfvars (workspace-specific file for non-default workspaces).
 case "$PROVIDER" in
     vultr)
-        cat > "${TF_DIR}/terraform.tfvars" <<EOF
+        cat > "$_ws_tfvars" <<EOF
 provider_name = "vultr"
 region        = "${REGION}"
 plan          = "${PLAN}"
-hostname      = "forgejo"
+hostname      = "${HOSTNAME}"
 EOF
         ;;
     aws|azure)
-        cat > "${TF_DIR}/terraform.tfvars" <<EOF
+        cat > "$_ws_tfvars" <<EOF
 region   = "${REGION}"
 plan     = "${PLAN}"
-hostname = "forgejo"
+hostname = "${HOSTNAME}"
 EOF
         ;;
 esac
-info "terraform.tfvars written (${TF_DIR}/terraform.tfvars)."
+info "tfvars written (${_ws_tfvars})."
 
 # ── SSH key for connecting to VPS ────────────────────────────────────────────
 SSH_KEY="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
@@ -734,7 +936,7 @@ cd "$TF_DIR"
 # already exists with the same name (conflict on RG create).  Delete it first if
 # present, then wait for Azure to finish the deletion before starting apply.
 if [[ "$PROVIDER" == "azure" ]]; then
-    _rg_name="$(grep 'hostname' "${TF_DIR}/terraform.tfvars" | awk -F'"' '{print $2}')"
+    _rg_name="$HOSTNAME"
     if [[ -n "$_rg_name" ]]; then
         _rg_state="$(az group show --name "$_rg_name" --query properties.provisioningState -o tsv 2>/dev/null || echo "Deleted")"
         if [[ "$_rg_state" != "Deleted" ]]; then
@@ -757,10 +959,21 @@ if [[ "$PROVIDER" == "azure" ]]; then
 fi
 
 terraform init -upgrade -input=false
-terraform apply -auto-approve -input=false
+terraform workspace select "$WORKSPACE" 2>/dev/null || terraform workspace new "$WORKSPACE"
+
+# Pass workspace-specific var-file for non-default workspaces (default workspace
+# uses terraform.tfvars which Terraform picks up automatically).
+_apply_args=(-auto-approve -input=false)
+[[ "$WORKSPACE" != "default" ]] && _apply_args+=(-var-file="$_ws_tfvars")
+terraform apply "${_apply_args[@]}"
+
 IP="$(terraform output -raw public_ipv4)"
 SSH_USER="$(terraform output -raw ssh_user)"
 cd "$SCRIPT_DIR"
+
+# Append provision event to the log (one JSON object per line, append-only).
+_log_event "$(printf '{"action":"provision","ts":"%s","provider":"%s","workspace":"%s","ip":"%s","region":"%s","plan":"%s"}' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PROVIDER" "$WORKSPACE" "$IP" "$REGION" "$PLAN")"
 
 # Persist provider selection so next run defaults to the same provider
 echo "$PROVIDER" > .last-provider

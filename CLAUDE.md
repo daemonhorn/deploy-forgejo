@@ -16,11 +16,37 @@ Automates deployment of a [Forgejo](https://forgejo.org/) container instance on 
 **Deploy / reprovision:**
 ```
 ./provision.sh      # Vault → prompt provider/region/plan (menus) → write tfvars → terraform apply → deploy.sh on VPS
+./provision.sh --workspace <name>                         # deploy a second instance in its own Terraform workspace
+./provision.sh --non-interactive --provider vultr \
+    --region ewr --plan vc2-1c-1gb                        # unattended/cron (no interactive prompts)
+```
+
+**Destroy an instance:**
+```
+./provision.sh --destroy                     # picker if multiple active instances; else destroys current
+./provision.sh --destroy --workspace <name>  # destroy a specific workspace
+./provision.sh --destroy --destroy-ip <ip>   # destroy by IP (looked up in .provision-log.json)
+./provision.sh --destroy --destroy-all       # destroy every active instance for the current provider
 ```
 
 **Issue SSH cert to a user:**
 ```
 ./sign-user-key.sh <forgejo-username> <user-key.pub>
+```
+
+**Mirror recently-active repositories to a new instance:**
+```
+./mirror-git.sh \
+    --dest-provider vultr --dest-region ewr --dest-plan vc2-1c-1gb
+    # provisions new instance, mirrors repos updated in last 7 days
+
+./mirror-git.sh --dest-url https://DEST_IP --days 14
+    # target existing instance, mirror repos from last 14 days
+
+./mirror-git.sh \
+    --src-url https://SRC_IP --src-token TOKEN \
+    --dest-url https://DEST_IP --dest-token TOKEN \
+    --quiet                                              # unattended/cron
 ```
 
 **Export / backup all repositories:**
@@ -87,11 +113,13 @@ Forgejo's **built-in SSH server is disabled** (`START_SSH_SERVER = false`). A se
 | `deploy.sh` | Remote: installs Docker, configures host sshd, issues cert, starts services |
 | `sign-user-key.sh` | Signs a user SSH key with the Yubikey CA via PKCS#11 |
 | `export-git.sh` | Exports all Forgejo repositories to a portable tar.zst archive (cron-safe) |
+| `mirror-git.sh` | Mirrors recently-active repos to a new Forgejo instance (cron-safe) |
 | `files/forgejo-keys.sh` | Deployed to VPS; called by sshd AuthorizedKeysCommand |
 | `files/forgejo-cert-extract.py` | Parses SSH cert binary to extract base public key |
 | `files/sshd_forgejo.conf` | sshd config for port-2222 Forgejo SSH daemon |
 | `files/templates/app.ini.tmpl` | Forgejo config; sets `SSH_TRUSTED_USER_CA_KEYS_FILENAME` |
 | `terraform/modules/providers/vultr/main.tf` | Vultr resources (instance, firewall, SSH key) |
+| `.provision-log.json` | Append-only NDJSON log of every provision/destroy event |
 
 ## Local Dependencies
 
@@ -128,6 +156,31 @@ Before running `setup.sh`:
 | `vultr` | `vultr_api_key` | `terraform/vultr/` | `vc2-1c-0.5gb` |
 | `aws` | `aws_access_key` + `aws_secret_access_key` | `terraform/aws/` | `t3.micro` |
 | `azure` | `azure_credentials` (JSON) | `terraform/azure/` | `Standard_B1s` |
+
+## Multiple Instances (Terraform Workspaces)
+
+`provision.sh` supports Terraform workspaces so two instances can coexist under the same provider with isolated state files.
+
+- Default workspace (`default`) uses `terraform.tfvars` and hostname `forgejo`.
+- Non-default workspace `<name>` uses `terraform.<name>.tfvars` and hostname `forgejo-<name>` (required for Azure, where the resource group IS named after the hostname).
+- Use `--workspace <name>` on both `provision.sh` and `--destroy` to target a specific workspace.
+
+### `--non-interactive` flag
+
+Skips all interactive menus. Requires `--provider`, `--region`, and `--plan`. Used by `mirror-git.sh` when auto-provisioning a destination instance.
+
+### Provision log (`.provision-log.json`)
+
+Every `provision.sh` run appends one JSON object per line (NDJSON, append-only):
+
+```json
+{"action":"provision","ts":"2026-05-14T03:00:00Z","provider":"vultr","workspace":"default","ip":"1.2.3.4","region":"ewr","plan":"vc2-1c-1gb"}
+{"action":"destroy","ts":"2026-05-14T04:00:00Z","provider":"vultr","workspace":"default","ip":"1.2.3.4","region":"","plan":""}
+```
+
+Active instances = those where the latest event per `(provider, workspace)` has `action = "provision"`.
+
+`--destroy` reads this log to build the instance picker. If the log is absent or has no entries for the current provider, it falls back to reading `terraform output` from the current workspace.
 
 ## TLS / Domain
 
