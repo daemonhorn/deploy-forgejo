@@ -1076,7 +1076,7 @@ info "SSH port is up."
 info "known_hosts.deploy content:"
 cat known_hosts.deploy >&2
 
-SSH_OPTS="-i $SSH_KEY -o UserKnownHostsFile=./known_hosts.deploy -o StrictHostKeyChecking=yes"
+SSH_OPTS="-i $SSH_KEY -o UserKnownHostsFile=./known_hosts.deploy -o StrictHostKeyChecking=yes -o CanonicalizeHostname=no"
 _SSH_HOST="$(_ssh_host "$CONNECT_IP")"
 
 # On AWS, user_data configures root access after sshd is already listening.
