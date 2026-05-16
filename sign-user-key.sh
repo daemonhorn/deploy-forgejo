@@ -220,6 +220,50 @@ _require_ed25519_pubkey() {
     [[ "$_type" == "ssh-ed25519" ]]
 }
 
+# Load the PKCS#11 CA key into ssh-agent with a single PIN prompt so batch
+# signings reuse the cached key via ssh-keygen -U instead of prompting per user.
+# On success sets _YUBIKEY_IN_AGENT=true.  Falls back gracefully if the agent is
+# unavailable or the PIN is wrong.
+#
+# Security note: the PIN is passed to ssh-add's environment as _YKPIN for the
+# duration of that one execve() call.  It is briefly visible to same-uid processes
+# via /proc/PID/environ.  Acceptable on a local admin workstation.
+_YUBIKEY_IN_AGENT=false
+_yubikey_agent_load() {
+    if [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
+        warn "No SSH agent running (SSH_AUTH_SOCK unset); PIN will be prompted per signing."
+        return
+    fi
+    printf "YubiKey PIN: "
+    { set +x; } 2>/dev/null
+    read -r -s _ypin
+    echo
+    local _ap
+    _ap="$(mktemp)"
+    chmod 700 "$_ap"
+    # The askpass script reads the PIN from _YKPIN which ssh-add inherits.
+    printf '#!/bin/sh\nprintf "%%s" "$_YKPIN"\n' > "$_ap"
+    local _rc=0
+    # set +x already active above; keep it so the PIN assignment is not traced.
+    _YKPIN="$_ypin" DISPLAY="${DISPLAY:-:0}" SSH_ASKPASS_REQUIRE=force SSH_ASKPASS="$_ap" \
+        ssh-add -s "$PKCS11_LIB" < /dev/null 2>&1 || _rc=$?
+    rm -f "$_ap"
+    unset _ypin
+    [[ "${DEBUG}" == 1 ]] && set -x
+    if [[ $_rc -eq 0 ]]; then
+        _YUBIKEY_IN_AGENT=true
+    else
+        warn "Failed to load YubiKey into agent (wrong PIN? PIV locks after 3 wrong attempts)."
+        warn "Falling back to per-signing PIN prompt."
+    fi
+}
+
+_yubikey_agent_unload() {
+    [[ "$_YUBIKEY_IN_AGENT" == true ]] || return 0
+    ssh-add -e "$PKCS11_LIB" 2>/dev/null || true
+    _YUBIKEY_IN_AGENT=false
+}
+
 # Derive a deterministic web UI password from an Ed25519 private key and an instance IP.
 # Challenge: "webapp-password:<instance_ip>:v1" — tied to the instance lifetime.
 # After weekly rotation the instance IP changes; re-run sign-user-key.sh --web-password
@@ -504,7 +548,14 @@ VALID_COUNT=0
 for pf in "${PUBKEY_FILES[@]}"; do [[ -n "$pf" ]] && VALID_COUNT=$((VALID_COUNT + 1)); done
 
 header "Signing $VALID_COUNT key(s) with Yubikey (validity: $VALIDITY)"
-warn "Touch is cached for 15 s — you may need to touch the Yubikey multiple times."
+_yubikey_agent_load
+if [[ "$_YUBIKEY_IN_AGENT" == true ]]; then
+    info "PIN accepted. Touch the Yubikey when prompted (cached 15 s between signings)."
+    _sign_extra=(-U)
+else
+    warn "Touch is cached for 15 s — you may need to touch the Yubikey multiple times."
+    _sign_extra=(-D "$PKCS11_LIB")
+fi
 echo
 
 declare -a CERT_FILES=()
@@ -529,7 +580,7 @@ for i in "${!USERNAMES[@]}"; do
     info "  Signing '$username'..."
     if ssh-keygen \
             -s ca.pub \
-            -D "$PKCS11_LIB" \
+            "${_sign_extra[@]}" \
             -I "${username}@forgejo" \
             -n "git" \
             -V "$VALIDITY" \
@@ -553,6 +604,8 @@ for i in "${!USERNAMES[@]}"; do
         SIGN_FAILED+=("$username")
     fi
 done
+
+_yubikey_agent_unload
 
 echo
 
