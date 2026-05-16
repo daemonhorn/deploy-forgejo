@@ -446,6 +446,7 @@ docker exec -u git "$FORGEJO_CONTAINER" \
     /usr/local/bin/forgejo admin user change-password \
         --username "$FORGEJO_ADMIN_USER" \
         --password "$FORGEJO_ADMIN_PASSWORD" \
+        --must-change-password=false \
     2>&1 | grep -v '^$' || true
 info "Admin password set. Retrieve from Vault on your local machine:"
 info "  vault kv get -field=admin_password secret/forgejo/deploy"
