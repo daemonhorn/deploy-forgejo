@@ -44,6 +44,9 @@ terraform/vultr/.terraform.lock.hcl
 # Deploy artifacts
 known_hosts.deploy
 
+# Export archives (export-git.sh default output destination)
+archive/*.tar.zst
+
 # Rendered templates (never committed; generated at deploy time)
 files/.env
 files/app.ini

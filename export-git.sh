@@ -16,7 +16,7 @@
 #   --forgejo-url URL        Forgejo base URL (auto-detect from Terraform if omitted)
 #   --admin-token TOKEN      Forgejo admin API token (auto-generate via SSH if omitted)
 #   --output FILE            Output archive path
-#                            (default: ./forgejo-export-YYYYMMDD-HHMMSS.tar.zst)
+#                            (default: ./archive/forgejo-export-YYYYMMDD-HHMMSS.tar.zst)
 #   --ssh-key FILE           SSH key for auto-token generation
 #                            (default: ~/.ssh/id_ed25519)
 #   --compression LEVEL      zstd compression level 1-19 (default: 3)
@@ -126,7 +126,7 @@ done
 
 # ── Output path ───────────────────────────────────────────────────────────────
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-[[ -z "$OUTPUT_FILE" ]] && OUTPUT_FILE="${SCRIPT_DIR}/forgejo-export-${TIMESTAMP}.tar.zst"
+[[ -z "$OUTPUT_FILE" ]] && OUTPUT_FILE="${SCRIPT_DIR}/archive/forgejo-export-${TIMESTAMP}.tar.zst"
 
 _out_dir="$(dirname "$OUTPUT_FILE")"
 mkdir -p "$_out_dir" || error "Cannot create output directory: $_out_dir"
