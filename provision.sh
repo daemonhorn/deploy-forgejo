@@ -1028,6 +1028,14 @@ if [[ "$IP_STACK" != "ipv4" && -z "$IPV6" ]]; then
     [[ -n "$IPV6" ]] || warn "IPv6 address still empty after 90s — continuing; may need to re-run."
 fi
 
+# Normalize IPv6 to compressed form (no leading zeros).  Certbot converts the
+# address via Python's ipaddress.ip_address() before naming the cert directory,
+# so DOMAIN must match that compressed form or nginx can't find the cert.
+if [[ -n "$IPV6" ]]; then
+    _v6_norm="$(python3 -c "import ipaddress; print(str(ipaddress.ip_address('${IPV6}')))" 2>/dev/null || true)"
+    [[ -n "$_v6_norm" ]] && IPV6="$_v6_norm"
+fi
+
 cd "$SCRIPT_DIR"
 
 # Append provision event to the log (one JSON object per line, append-only).
