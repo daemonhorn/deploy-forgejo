@@ -55,6 +55,7 @@ services:
   certbot:
     image: certbot/certbot
     restart: unless-stopped
+    network_mode: host
     volumes:
       - letsencrypt:/etc/letsencrypt
       - certbot-webroot:/var/www/certbot

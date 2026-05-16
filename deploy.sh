@@ -76,26 +76,7 @@ else
     info "Docker already installed, skipping."
 fi
 
-# ── 1b. Configure Docker daemon for IPv6-only deployments ────────────────────
-# On IPv6-only hosts, Docker containers default to private IPv4 networking with
-# no route to the IPv4 internet.  Enable IPv6 in the daemon so containers can
-# reach IPv6 internet endpoints (e.g. the Let's Encrypt ACME API for certbot).
-# Guard on daemon.json absence so we don't restart Docker on every re-run.
-if [[ "${IP_STACK:-ipv4}" == "ipv6" ]] && [ ! -f /etc/docker/daemon.json ]; then
-    info "Configuring Docker daemon for IPv6 container networking..."
-    mkdir -p /etc/docker
-    cat > /etc/docker/daemon.json <<'EOF'
-{
-  "ipv6": true,
-  "fixed-cidr-v6": "fd00:db8:1::/64",
-  "ip6tables": true
-}
-EOF
-    systemctl reload-or-restart docker
-    info "Docker daemon configured for IPv6."
-fi
-
-# ── 1c. Unattended upgrades — daily at 08:00 UTC, including kernels ──────────
+# ── 1b. Unattended upgrades — daily at 08:00 UTC, including kernels ──────────
 # Placed after Docker install so all apt operations in this session complete
 # before the timer is enabled and can fire in the background.
 if [ ! -f /etc/apt/apt.conf.d/50unattended-upgrades ] || \
