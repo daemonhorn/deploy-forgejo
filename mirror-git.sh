@@ -60,7 +60,8 @@
 #   Generate a token via SSH (replace <ip> and <admin-user> accordingly):
 #     ssh deploy@<ip> \
 #       "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
-#        generate-access-token --username <admin-user> --token-name mirror --raw"
+#        generate-access-token --username <admin-user> --token-name mirror \
+#        --token-expiry 1h --raw"
 #
 #   Or retrieve the admin password from Vault, then create a token in the web UI
 #   (User Settings → Applications → Generate Token):
@@ -208,7 +209,7 @@ if [[ -z "$SRC_TOKEN" ]]; then
     SRC_TOKEN="$(ssh $_ssh_opts "deploy@$_src_ip" \
         "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
          generate-access-token --username $_admin_user \
-         --token-name mirror-src-$(date +%s) --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
+         --token-name mirror-src-$(date +%s) --token-expiry 1h --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
         2>/dev/null || true)"
     # Take only the last line in case Forgejo emits log lines before the token.
     SRC_TOKEN="$(printf '%s\n' "$SRC_TOKEN" | tail -1 | tr -d '[:space:]')"
@@ -227,7 +228,7 @@ if [[ -z "$SRC_TOKEN" ]]; then
         warn "  Response body: $(tr -d '\n' < "$_src_resp" | head -c 400)"
         if [[ "$_st" == "403" ]]; then
             warn "  Generate a token manually, then re-run with --src-token TOKEN:"
-            warn "    ssh deploy@$_src_ip docker exec -u git forgejo /usr/local/bin/forgejo admin user generate-access-token --username $_admin_user --token-name manual-src --scopes '$_FORGEJO_ADMIN_SCOPES' --raw"
+            warn "    ssh deploy@$_src_ip docker exec -u git forgejo /usr/local/bin/forgejo admin user generate-access-token --username $_admin_user --token-name manual-src --token-expiry 1h --scopes '$_FORGEJO_ADMIN_SCOPES' --raw"
         elif [[ "$_st" == "401" ]]; then
             warn "  Check that the admin user exists: ssh deploy@$_src_ip docker exec -u git forgejo forgejo admin user list"
         fi
@@ -460,7 +461,7 @@ if [[ -z "$DEST_TOKEN" ]]; then
     DEST_TOKEN="$(ssh $_dst_ssh_opts "deploy@$_dst_host" \
         "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
          generate-access-token --username $_admin_user \
-         --token-name mirror-dst-$(date +%s) --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
+         --token-name mirror-dst-$(date +%s) --token-expiry 1h --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
         2>/dev/null || true)"
     # Take only the last line in case Forgejo emits log lines before the token.
     DEST_TOKEN="$(printf '%s\n' "$DEST_TOKEN" | tail -1 | tr -d '[:space:]')"
@@ -477,7 +478,7 @@ if [[ -z "$DEST_TOKEN" ]]; then
         warn "  Response body: $(tr -d '\n' < "$_dst_resp" | head -c 400)"
         if [[ "$_dt" == "403" ]]; then
             warn "  Generate a token manually, then re-run with --dest-token TOKEN:"
-            warn "    ssh deploy@$_dst_host docker exec -u git forgejo /usr/local/bin/forgejo admin user generate-access-token --username $_admin_user --token-name manual-dst --scopes '$_FORGEJO_ADMIN_SCOPES' --raw"
+            warn "    ssh deploy@$_dst_host docker exec -u git forgejo /usr/local/bin/forgejo admin user generate-access-token --username $_admin_user --token-name manual-dst --token-expiry 1h --scopes '$_FORGEJO_ADMIN_SCOPES' --raw"
         elif [[ "$_dt" == "401" ]]; then
             warn "  Check that the admin user exists: ssh deploy@$_dst_host docker exec -u git forgejo forgejo admin user list"
         fi

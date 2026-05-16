@@ -108,7 +108,7 @@ resolve_forgejo_credentials() {
         ADMIN_TOKEN="$(ssh $_ssh_opts "deploy@$_ip" \
             "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
              generate-access-token --username $_admin_user \
-             --token-name sign-$(date +%s) --raw 2>&1" 2>/dev/null || true)"
+             --token-name sign-$(date +%s) --token-expiry 1h --raw 2>&1" 2>/dev/null || true)"
         [[ -n "$ADMIN_TOKEN" ]] \
             || error "Could not obtain admin token. Pass --admin-token TOKEN or set FORGEJO_ADMIN_TOKEN."
         info "Admin token obtained."

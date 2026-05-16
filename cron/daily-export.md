@@ -54,11 +54,15 @@ To get a long-lived token for use in cron:
 # Admin username from Vault
 vault kv get -field=forgejo_admin_user secret/forgejo/deploy
 
-# Generate token via SSH
+# Generate token via SSH (add --token-expiry 1h for automatic cleanup)
 ssh deploy@<ip> \
   "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
-   generate-access-token --username <admin-user> --token-name daily-export --raw"
+   generate-access-token --username <admin-user> --token-name daily-export \
+   --token-expiry 1h --raw"
 ```
+
+Note: the scripts auto-generate a fresh 1-hour token on every run, so no manual deletion or rotation is needed.
+
 
 Or log in to the Forgejo web UI and create a token under User Settings → Applications.
 

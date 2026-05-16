@@ -48,10 +48,11 @@ Tokens are auto-generated via SSH when Vault and SSH connectivity are available.
 # Get the admin username
 vault kv get -field=forgejo_admin_user secret/forgejo/deploy
 
-# Generate a token via SSH
+# Generate a short-lived token via SSH (expires automatically after 1 hour)
 ssh deploy@<ip> \
   "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
-   generate-access-token --username <admin-user> --token-name export --raw"
+   generate-access-token --username <admin-user> --token-name export \
+   --token-expiry 1h --raw"
 
 # Or retrieve the admin password from Vault and create a long-lived token in the web UI
 # (User Settings → Applications → Generate Token)
