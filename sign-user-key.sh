@@ -664,6 +664,62 @@ if $REGISTER || $WEB_PASSWORD; then
     done
 fi
 
+# ── Write SSH client config ────────────────────────────────────────────────────
+# Resolve HostName from FORGEJO_URL if already known; fall back to Terraform
+# output so config files are written even when --no-register is passed.
+_config_host=""
+if [[ -n "${FORGEJO_URL:-}" ]]; then
+    _config_host="${FORGEJO_URL#https://}"; _config_host="${_config_host#http://}"
+    _config_host="${_config_host%%/*}"; _config_host="${_config_host#[}"; _config_host="${_config_host%]}"
+elif command -v terraform &>/dev/null; then
+    _last_provider=""; [[ -f "$SCRIPT_DIR/.last-provider" ]] && \
+        _last_provider="$(tr -d '[:space:]' < "$SCRIPT_DIR/.last-provider")"
+    _ch_dirs=("$SCRIPT_DIR/terraform/vultr")
+    [[ -n "$_last_provider" ]] && \
+        _ch_dirs=("$SCRIPT_DIR/terraform/$_last_provider" "$SCRIPT_DIR/terraform/vultr")
+    for _ch_dir in "${_ch_dirs[@]}"; do
+        [[ -d "$_ch_dir" ]] || continue
+        _ch="$(cd "$_ch_dir" && terraform output -raw public_ipv4 2>/dev/null || true)"
+        [[ -z "$_ch" ]] && _ch="$(cd "$_ch_dir" && terraform output -raw public_ipv6 2>/dev/null || true)"
+        [[ -n "$_ch" ]] && { _config_host="$_ch"; break; }
+    done
+fi
+
+declare -a CONFIG_FILES=()
+
+if [[ -z "$_config_host" ]]; then
+    warn "Instance IP unknown — SSH config files skipped. Pass --forgejo-url to generate them."
+    for i in "${!USERNAMES[@]}"; do CONFIG_FILES+=(""); done
+else
+    echo
+    header "Writing SSH client configs (HostName: $_config_host)..."
+    echo
+    for i in "${!USERNAMES[@]}"; do
+        cert="${CERT_FILES[$i]:-}"
+        username="${USERNAMES[$i]}"
+        if [[ -z "$cert" ]]; then
+            CONFIG_FILES+=("")
+            continue
+        fi
+        # Derive IdentityFile from the cert name: strip -cert.pub suffix.
+        # After copying the folder to ~/.ssh/ the private key lives at this path.
+        cert_base="$(basename "$cert")"
+        keyname="${cert_base%-cert.pub}"
+        config_out="$OUTPUT_DIR/$username/config"
+        cat > "$config_out" <<EOF
+Host forgejo
+    HostName $_config_host
+    Port 2222
+    User git
+    IdentityFile ~/.ssh/$keyname
+    CertificateFile ~/.ssh/$cert_base
+EOF
+        chmod 600 "$config_out"
+        CONFIG_FILES+=("$config_out")
+        info "  ✓ $username → $config_out"
+    done
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -687,6 +743,9 @@ for i in "${!USERNAMES[@]}"; do
         if [[ "$auto" == "true" ]]; then
             echo "       key:  ${cert%-cert.pub}  ← send to user via secure channel"
         fi
+        if [[ -n "${CONFIG_FILES[$i]:-}" ]]; then
+            echo "       conf: ${CONFIG_FILES[$i]}"
+        fi
         if $WEB_PASSWORD && [[ -n "${WEB_PASSES[$i]:-}" ]]; then
             { set +x; } 2>/dev/null
             printf "       web:  %s  ← Forgejo web UI password\n" "${WEB_PASSES[$i]}"
@@ -703,7 +762,12 @@ fi
 
 echo
 echo "  Each user needs:"
-echo "    *-cert.pub  → place as ~/.ssh/<keyname>-cert.pub alongside their private key"
+if [[ -n "${_config_host:-}" ]]; then
+    echo "    Copy $OUTPUT_DIR/<username>/ to ~/.ssh/ (merge config into existing if needed)."
+    echo "    Then clone with: git clone git@forgejo:<username>/<repo>.git"
+else
+    echo "    *-cert.pub  → place as ~/.ssh/<keyname>-cert.pub alongside their private key"
+fi
 if [[ "${IS_AUTO_GENERATED[*]:-}" == *true* ]]; then
     echo "    id_ed25519  → send private key to user via secure channel (e.g. encrypted email)"
 fi
