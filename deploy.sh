@@ -18,6 +18,23 @@ error() { echo -e "${RED}[deploy]${NC} $*" >&2; exit 1; }
 # is always visible even when the failing command produces no output of its own.
 trap 'ret=$?; echo -e "${RED}[deploy] FAILED${NC} at line ${LINENO} — command exited ${ret}" >&2' ERR
 
+# ── Debug mode ────────────────────────────────────────────────────────────────
+# Activated by provision.sh passing DEBUG='1' in the SSH env.
+# _run() logs command + exit code; set -x traces every line to stderr.
+# NOTE: _run() never logs captured stdout — safe around secret-bearing calls.
+DEBUG=${DEBUG:-0}
+_run() {
+    if [[ "${DEBUG}" == 1 ]]; then
+        printf '[debug] $ %s\n' "$*" >&2
+        "$@"; local _rc=$?
+        printf '[debug] -> rc=%d\n' "${_rc}" >&2
+        return "${_rc}"
+    else
+        "$@"
+    fi
+}
+[[ "${DEBUG}" == 1 ]] && set -x
+
 # Suppress debconf interactive prompts for every apt-get call in this script.
 # NEEDRESTART_MODE=a tells needrestart (Debian 12 default) to auto-restart
 # services without asking — without this, apt-get install hangs on a prompt
@@ -69,8 +86,8 @@ if ! command -v docker &>/dev/null; then
 https://download.docker.com/linux/debian $(lsb_release -cs) stable" \
         > /etc/apt/sources.list.d/docker.list
     apt-get $APT_OPTS update
-    apt-get $APT_OPTS install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin python3
-    systemctl enable --now docker
+    _run apt-get $APT_OPTS install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin python3
+    _run systemctl enable --now docker
     info "Docker installed."
 else
     info "Docker already installed, skipping."
@@ -291,7 +308,7 @@ info "Starting nginx in HTTP-only mode for ACME challenge..."
 cp "$WORKDIR/nginx.conf" "$WORKDIR/nginx-tls.conf"
 cp "$WORKDIR/nginx-http.conf" "$WORKDIR/nginx.conf"
 
-docker compose -f "$WORKDIR/docker-compose.yml" \
+_run docker compose -f "$WORKDIR/docker-compose.yml" \
     --env-file "$WORKDIR/.env" \
     --project-directory "$WORKDIR" \
     up -d nginx
@@ -371,7 +388,7 @@ fi
 info "Activating TLS nginx config and starting all services..."
 cp "$WORKDIR/nginx-tls.conf" "$WORKDIR/nginx.conf"
 
-docker compose -f "$WORKDIR/docker-compose.yml" \
+_run docker compose -f "$WORKDIR/docker-compose.yml" \
     --env-file "$WORKDIR/.env" \
     --project-directory "$WORKDIR" \
     up -d

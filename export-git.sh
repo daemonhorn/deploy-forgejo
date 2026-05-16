@@ -72,8 +72,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 info()  { [[ "$QUIET" == "true" ]] && return 0; echo -e "${GREEN}[export]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[export]${NC} $*" >&2; }
 error() { echo -e "${RED}[export]${NC} $*" >&2; exit 1; }
@@ -111,6 +111,7 @@ while [[ $# -gt 0 ]]; do
         --no-archived)   INCLUDE_ARCHIVED=false; shift ;;
         --insecure)      INSECURE=true;          shift ;;
         --quiet)         QUIET=true;             shift ;;
+        --debug)         DEBUG=1;               shift ;;
         --help|-h)
             sed -n '/^# USAGE/,/^# REQUIREMENTS/p' "$0" | sed 's/^# \?//'
             exit 0 ;;
@@ -118,6 +119,8 @@ while [[ $# -gt 0 ]]; do
             error "Unknown argument: $1. Use --help for usage." ;;
     esac
 done
+
+[[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 for _cmd in git curl python3 tar zstd; do
@@ -193,12 +196,13 @@ if [[ -z "$ADMIN_TOKEN" ]]; then
     info "Generating admin API token via SSH as deploy@$_ip (user: $_admin_user)..."
     _tok_err="$(mktemp)"
     # Try with --token-expiry 1h first; fall back without it (not all versions support it).
+    # In debug mode: tee stderr live to terminal so Forgejo errors are immediately visible.
     # shellcheck disable=SC2086
     ADMIN_TOKEN="$(ssh $_ssh_opts "deploy@$_ip" \
         "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
          generate-access-token --username $_admin_user \
          --token-name export-$(date +%s) --token-expiry 1h --raw" \
-        2>"$_tok_err" || true)"
+        2> >(if [[ "${DEBUG}" == 1 ]]; then tee -a "$_tok_err" >&2; else cat >> "$_tok_err"; fi) || true)"
     ADMIN_TOKEN="$(printf '%s\n' "$ADMIN_TOKEN" | tail -1 | tr -d '[:space:]')"
     if [[ -z "$ADMIN_TOKEN" ]]; then
         # shellcheck disable=SC2086
@@ -206,7 +210,7 @@ if [[ -z "$ADMIN_TOKEN" ]]; then
             "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
              generate-access-token --username $_admin_user \
              --token-name export-$(date +%s) --raw" \
-            2>>"$_tok_err" || true)"
+            2> >(if [[ "${DEBUG}" == 1 ]]; then tee -a "$_tok_err" >&2; else cat >> "$_tok_err"; fi) || true)"
         ADMIN_TOKEN="$(printf '%s\n' "$ADMIN_TOKEN" | tail -1 | tr -d '[:space:]')"
     fi
     if [[ -z "$ADMIN_TOKEN" ]]; then

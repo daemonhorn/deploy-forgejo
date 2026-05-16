@@ -76,8 +76,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 QUIET=false
 info()   { $QUIET && return 0; echo -e "${GREEN}[mirror]${NC} $*"; }
 warn()   { echo -e "${YELLOW}[mirror]${NC} $*" >&2; }
@@ -135,12 +135,15 @@ while [[ $# -gt 0 ]]; do
         --no-archived)    INCLUDE_ARCHIVED=false; shift ;;
         --insecure)       INSECURE=true; shift ;;
         --quiet)          QUIET=true; shift ;;
+        --debug)          DEBUG=1; shift ;;
         --help|-h)
             sed -n '/^# USAGE/,/^# REQUIREMENTS/p' "$0" | sed 's/^# \?//'
             exit 0 ;;
         *)  error "Unknown argument: $1. Use --help for usage." ;;
     esac
 done
+
+[[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 for _cmd in git curl python3 ssh ssh-keyscan; do
@@ -207,12 +210,13 @@ if [[ -z "$SRC_TOKEN" ]]; then
     info "Generating source admin token via SSH as deploy@${_src_ip}..."
     _tok_err="$(mktemp)"
     # Try with --token-expiry 1h first; fall back without it (not all versions support it).
+    # In debug mode: tee stderr live to terminal so Forgejo errors are immediately visible.
     # shellcheck disable=SC2086
     SRC_TOKEN="$(ssh $_ssh_opts "deploy@$_src_ip" \
         "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
          generate-access-token --username $_admin_user \
          --token-name mirror-src-$(date +%s) --token-expiry 1h --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
-        2>"$_tok_err" || true)"
+        2> >(if [[ "${DEBUG}" == 1 ]]; then tee -a "$_tok_err" >&2; else cat >> "$_tok_err"; fi) || true)"
     # Take only the last line in case Forgejo emits log lines before the token.
     SRC_TOKEN="$(printf '%s\n' "$SRC_TOKEN" | tail -1 | tr -d '[:space:]')"
     if [[ -z "$SRC_TOKEN" ]]; then
@@ -221,7 +225,7 @@ if [[ -z "$SRC_TOKEN" ]]; then
             "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
              generate-access-token --username $_admin_user \
              --token-name mirror-src-$(date +%s) --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
-            2>>"$_tok_err" || true)"
+            2> >(if [[ "${DEBUG}" == 1 ]]; then tee -a "$_tok_err" >&2; else cat >> "$_tok_err"; fi) || true)"
         SRC_TOKEN="$(printf '%s\n' "$SRC_TOKEN" | tail -1 | tr -d '[:space:]')"
     fi
     if [[ -z "$SRC_TOKEN" ]]; then
@@ -473,12 +477,13 @@ if [[ -z "$DEST_TOKEN" ]]; then
     info "Generating destination admin token via SSH as deploy@${_dst_host}..."
     _tok_err="$(mktemp)"
     # Try with --token-expiry 1h first; fall back without it (not all versions support it).
+    # In debug mode: tee stderr live to terminal so Forgejo errors are immediately visible.
     # shellcheck disable=SC2086
     DEST_TOKEN="$(ssh $_dst_ssh_opts "deploy@$_dst_host" \
         "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
          generate-access-token --username $_admin_user \
          --token-name mirror-dst-$(date +%s) --token-expiry 1h --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
-        2>"$_tok_err" || true)"
+        2> >(if [[ "${DEBUG}" == 1 ]]; then tee -a "$_tok_err" >&2; else cat >> "$_tok_err"; fi) || true)"
     # Take only the last line in case Forgejo emits log lines before the token.
     DEST_TOKEN="$(printf '%s\n' "$DEST_TOKEN" | tail -1 | tr -d '[:space:]')"
     if [[ -z "$DEST_TOKEN" ]]; then
@@ -487,7 +492,7 @@ if [[ -z "$DEST_TOKEN" ]]; then
             "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
              generate-access-token --username $_admin_user \
              --token-name mirror-dst-$(date +%s) --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
-            2>>"$_tok_err" || true)"
+            2> >(if [[ "${DEBUG}" == 1 ]]; then tee -a "$_tok_err" >&2; else cat >> "$_tok_err"; fi) || true)"
         DEST_TOKEN="$(printf '%s\n' "$DEST_TOKEN" | tail -1 | tr -d '[:space:]')"
     fi
     if [[ -z "$DEST_TOKEN" ]]; then

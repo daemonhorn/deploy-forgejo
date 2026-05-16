@@ -10,10 +10,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 CACHE_DIR="${SCRIPT_DIR}/.cache"
 CACHE_TTL=86400  # seconds — refresh provider data at most once per day
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[provision]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[provision]${NC} $*"; }
 error() { echo -e "${RED}[provision]${NC} $*" >&2; exit 1; }
@@ -366,8 +367,11 @@ _IP_STACK_EXPLICIT=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --debug)
+            DEBUG=1
+            shift ;;
+        --debug-certbot)
             CERTBOT_STAGING=1
-            warn "Debug mode: certbot will use staging CA and verbose logs."
+            warn "Certbot staging mode: certificate will be issued by the staging CA (not browser-trusted)."
             shift ;;
         --provider)
             [[ $# -ge 2 ]] || error "--provider requires a value (vultr|aws|azure)"
@@ -402,9 +406,12 @@ while [[ $# -gt 0 ]]; do
             _IP_STACK_EXPLICIT=true
             shift 2 ;;
         *)
-            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--ip-stack ipv4|ipv6|dual] [--debug]" ;;
+            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--ip-stack ipv4|ipv6|dual] [--debug] [--debug-certbot]" ;;
     esac
 done
+
+# Activate debug mode after argument parsing so set -x only traces main logic.
+[[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
 if [[ -n "$PROVIDER" && "$PROVIDER" != "vultr" && "$PROVIDER" != "aws" && "$PROVIDER" != "azure" ]]; then
     error "Invalid provider '$PROVIDER'. Use vultr, aws, or azure."
@@ -630,7 +637,7 @@ _destroy_workspace() {
     info "Destroying $PROVIDER infrastructure for workspace '${ws}' (IP: ${_display_addr})..."
     destroy_args=(-auto-approve -input=false)
     [[ "$ws" != "default" && -f "$wsfile" ]] && destroy_args+=(-var-file="$wsfile")
-    terraform destroy "${destroy_args[@]}"
+    _run terraform destroy "${destroy_args[@]}"
 
     # Write log entry before workspace delete so the record exists even if delete fails.
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1008,7 +1015,7 @@ terraform workspace select "$WORKSPACE" 2>/dev/null || terraform workspace new "
 # uses terraform.tfvars which Terraform picks up automatically).
 _apply_args=(-auto-approve -input=false)
 [[ "$WORKSPACE" != "default" ]] && _apply_args+=(-var-file="$_ws_tfvars")
-terraform apply "${_apply_args[@]}"
+_run terraform apply "${_apply_args[@]}"
 
 IP="$(terraform output -raw public_ipv4 2>/dev/null || true)"
 IPV6="$(terraform output -raw public_ipv6 2>/dev/null || true)"
@@ -1178,12 +1185,13 @@ info "Running deploy.sh on VPS as $SSH_USER..."
 SUDO_PREFIX=""
 [[ "$SSH_USER" != "root" ]] && SUDO_PREFIX="sudo env"
 # shellcheck disable=SC2086
-ssh $SSH_OPTS "${SSH_USER}@${_SSH_HOST}" \
+_run ssh $SSH_OPTS "${SSH_USER}@${_SSH_HOST}" \
     "${SUDO_PREFIX} DOMAIN='${DOMAIN}' \
      IP_STACK='${IP_STACK}' \
      IPV6='${IPV6:-}' \
      CERTBOT_EMAIL='${CERTBOT_EMAIL}' \
      CERTBOT_STAGING='${CERTBOT_STAGING}' \
+     DEBUG='${DEBUG}' \
      FORGEJO_ADMIN_USER='${FORGEJO_ADMIN_USER}' \
      FORGEJO_ADMIN_EMAIL='${FORGEJO_ADMIN_EMAIL}' \
      FORGEJO_ADMIN_PASSWORD='${FORGEJO_ADMIN_PASSWORD}' \

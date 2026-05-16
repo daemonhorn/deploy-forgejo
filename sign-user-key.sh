@@ -35,8 +35,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 info()   { echo -e "${GREEN}[sign]${NC} $*"; }
 warn()   { echo -e "${YELLOW}[sign]${NC} $*"; }
 error()  { echo -e "${RED}[sign]${NC} $*" >&2; exit 1; }
@@ -108,12 +108,13 @@ resolve_forgejo_credentials() {
         local _tok_err
         _tok_err="$(mktemp)"
         # Try with --token-expiry 1h first; fall back without it (not all versions support it).
+        # In debug mode: tee stderr live to terminal so Forgejo errors are immediately visible.
         # shellcheck disable=SC2086
         ADMIN_TOKEN="$(ssh $_ssh_opts "deploy@$_ip" \
             "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
              generate-access-token --username $_admin_user \
              --token-name sign-$(date +%s) --token-expiry 1h --raw" \
-            2>"$_tok_err" || true)"
+            2> >(if [[ "${DEBUG}" == 1 ]]; then tee -a "$_tok_err" >&2; else cat >> "$_tok_err"; fi) || true)"
         ADMIN_TOKEN="$(printf '%s\n' "$ADMIN_TOKEN" | tail -1 | tr -d '[:space:]')"
         if [[ -z "$ADMIN_TOKEN" ]]; then
             # shellcheck disable=SC2086
@@ -121,7 +122,7 @@ resolve_forgejo_credentials() {
                 "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
                  generate-access-token --username $_admin_user \
                  --token-name sign-$(date +%s) --raw" \
-                2>>"$_tok_err" || true)"
+                2> >(if [[ "${DEBUG}" == 1 ]]; then tee -a "$_tok_err" >&2; else cat >> "$_tok_err"; fi) || true)"
             ADMIN_TOKEN="$(printf '%s\n' "$ADMIN_TOKEN" | tail -1 | tr -d '[:space:]')"
         fi
         if [[ -z "$ADMIN_TOKEN" ]]; then
@@ -222,9 +223,11 @@ if [[ "${1:-}" != "--batch" ]]; then
             --forgejo-url) FORGEJO_URL="$2"; shift 2 ;;
             --admin-token) ADMIN_TOKEN="$2"; shift 2 ;;
             --no-register) REGISTER=false; shift ;;
+            --debug)       DEBUG=1; shift ;;
             *) error "Unknown option: $1" ;;
         esac
     done
+    [[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
     info "Signing public key for Forgejo user '$USERNAME' (validity: $VALIDITY)"
     info "Principal: git (Unix login user)"
@@ -290,9 +293,11 @@ while [[ $# -gt 0 ]]; do
         --forgejo-url) FORGEJO_URL="$2"; shift 2 ;;
         --admin-token) ADMIN_TOKEN="$2"; shift 2 ;;
         --no-register) REGISTER=false; shift ;;
+        --debug)       DEBUG=1; shift ;;
         *) error "Unknown option: $1" ;;
     esac
 done
+[[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
 mkdir -p "$OUTPUT_DIR"
 

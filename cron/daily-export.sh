@@ -8,9 +8,15 @@
 # repository, laid out as <owner>/<repo>.bundle inside the tar.  Restore with:
 #   tar -xf forgejo-YYYYMMDD-HHMM.tar.zst
 #   git clone path/to/<owner>/<repo>.bundle  destination/
+#
+# OPTIONS
+#   --debug    Enable verbose execution tracing and show all command output.
+#              DEBUG=1 in the environment has the same effect.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 
 # Where to write archives.  Override with FORGEJO_BACKUP_DIR= in the environment
 # or in crontab.example.
@@ -22,6 +28,15 @@ BACKUP_DIR="${FORGEJO_BACKUP_DIR:-/var/backups/forgejo}"
 KEEP=14
 
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --debug) DEBUG=1; shift ;;
+        *) log "Unknown argument: $1"; exit 1 ;;
+    esac
+done
+
+[[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
 mkdir -p "$BACKUP_DIR"
 
@@ -39,7 +54,8 @@ log "Export starting → $ARCHIVE"
 #
 # --quiet suppresses per-repo progress lines; errors still go to stderr and
 # therefore to the log file via the 2>&1 redirect in crontab.example.
-"$SCRIPT_DIR/export-git.sh" \
+# DEBUG=1 (exported above) propagates into export-git.sh automatically.
+_run "$SCRIPT_DIR/export-git.sh" \
     --output "$ARCHIVE" \
     --quiet
 

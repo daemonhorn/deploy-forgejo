@@ -29,6 +29,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root
 cd "$SCRIPT_DIR"
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 
 PROVIDER="${ROTATE_PROVIDER:-vultr}"
 REGION="${ROTATE_REGION:-ewr}"
@@ -37,6 +39,15 @@ PLAN="${ROTATE_PLAN:-vc2-1c-0.5gb}"
 TF_DIR="$SCRIPT_DIR/terraform/$PROVIDER"
 
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --debug) DEBUG=1; shift ;;
+        *) log "Unknown argument: $1"; exit 1 ;;
+    esac
+done
+
+[[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
 log "=== Weekly rotation start: provider=$PROVIDER region=$REGION plan=$PLAN ==="
 
@@ -61,7 +72,7 @@ log "Old workspace: $OLD_WORKSPACE  IP: ${OLD_IP:-unknown}"
 # --days 7 (the default) mirrors repos with activity in the past week; increase
 # if you want a fuller safety net at the cost of a longer migration window.
 log "Running mirror-git.sh..."
-"$SCRIPT_DIR/mirror-git.sh" \
+_run "$SCRIPT_DIR/mirror-git.sh" \
     --dest-provider "$PROVIDER" \
     --dest-region   "$REGION"   \
     --dest-plan     "$PLAN"     \
@@ -126,7 +137,7 @@ log "New instance healthy (HTTP $HTTP_CODE). Proceeding to destroy old instance.
 # necessary in cron (there is no terminal to read from).
 # provision.sh appends a "destroy" event to .provision-log.json for audit.
 log "Destroying old workspace '$OLD_WORKSPACE' (IP: ${OLD_IP:-unknown}) ..."
-"$SCRIPT_DIR/provision.sh" \
+_run "$SCRIPT_DIR/provision.sh" \
     --provider "$PROVIDER" \
     --destroy \
     --workspace "$OLD_WORKSPACE" \

@@ -93,12 +93,24 @@ Use `--refresh` to force a fresh fetch of region and plan data (normally cached 
 ./provision.sh --provider aws --refresh
 ```
 
-Use `--debug` to run certbot against the staging CA (faster iteration; certificate will not be browser-trusted):
+Use `--debug-certbot` to run certbot against the staging CA (faster iteration; certificate will not be browser-trusted):
+
+```
+./provision.sh --debug-certbot
+./provision.sh --provider aws --debug-certbot
+```
+
+Use `--debug` to enable verbose execution tracing across all scripts (full bash `set -x` trace + `_run` return code logging):
 
 ```
 ./provision.sh --debug
-./provision.sh --provider aws --debug
+./mirror-git.sh --debug --src-url https://IP
+./export-git.sh --debug
+./sign-user-key.sh alice alice.pub --debug
+./cron/daily-export.sh --debug
 ```
+
+`DEBUG=1` in the environment is equivalent to `--debug` and propagates automatically to sub-scripts.
 
 ## Adding a user
 

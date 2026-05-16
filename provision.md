@@ -47,6 +47,8 @@ Reads all secrets from the local Vault instance started by `setup.sh`.
 | `--destroy-all` | Destroy every active instance for the current provider |
 | `--destroy-ip IP` | Look up instance by IP in `.provision-log.json` and destroy it |
 | `--workspace NAME` | Target a specific workspace for `--destroy` |
+| `--debug` | Enable verbose execution tracing (`set -x` + `_run` return codes). Propagates to `deploy.sh` on the VPS via SSH env. |
+| `--debug-certbot` | Run certbot against the staging CA — cert will not be browser-trusted, but useful for testing TLS setup without hitting rate limits. |
 
 ## IP stack modes
 
