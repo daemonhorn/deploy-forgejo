@@ -686,25 +686,54 @@ elif command -v terraform &>/dev/null; then
 fi
 
 declare -a CONFIG_FILES=()
+declare -a KH_FILES=()
 
 if [[ -z "$_config_host" ]]; then
     warn "Instance IP unknown — SSH config files skipped. Pass --forgejo-url to generate them."
-    for i in "${!USERNAMES[@]}"; do CONFIG_FILES+=(""); done
+    for i in "${!USERNAMES[@]}"; do CONFIG_FILES+=(""); KH_FILES+=(""); done
 else
     echo
     header "Writing SSH client configs (HostName: $_config_host)..."
     echo
+
+    # Scan host keys once; all users share the same fingerprint.
+    info "Scanning SSH host keys at [$_config_host]:2222..."
+    _kh_content="$(ssh-keyscan -p 2222 -T 10 "$_config_host" 2>/dev/null || true)"
+    if [[ -z "$_kh_content" ]]; then
+        warn "ssh-keyscan returned nothing — known_hosts.forgejo will be omitted."
+    fi
+
     for i in "${!USERNAMES[@]}"; do
         cert="${CERT_FILES[$i]:-}"
         username="${USERNAMES[$i]}"
         if [[ -z "$cert" ]]; then
             CONFIG_FILES+=("")
+            KH_FILES+=("")
             continue
         fi
         # Derive IdentityFile from the cert name: strip -cert.pub suffix.
         # After copying the folder to ~/.ssh/ the private key lives at this path.
         cert_base="$(basename "$cert")"
         keyname="${cert_base%-cert.pub}"
+
+        # Write known_hosts.forgejo when keyscan succeeded.
+        _kh_out=""
+        _kh_config_lines=""
+        if [[ -n "$_kh_content" ]]; then
+            _kh_out="$OUTPUT_DIR/$username/known_hosts.forgejo"
+            {
+                printf '# SSH host fingerprints for forgejo (%s:2222)\n' "$_config_host"
+                printf '# Place alongside ~/.ssh/config; referenced by UserKnownHostsFile.\n'
+                printf '%s\n' "$_kh_content"
+            } > "$_kh_out"
+            chmod 644 "$_kh_out"
+            KH_FILES+=("$_kh_out")
+            _kh_config_lines="    UserKnownHostsFile ~/.ssh/known_hosts.forgejo
+    StrictHostKeyChecking yes"
+        else
+            KH_FILES+=("")
+        fi
+
         config_out="$OUTPUT_DIR/$username/config"
         cat > "$config_out" <<EOF
 # Forgejo instance: $_config_host
@@ -726,6 +755,7 @@ Host forgejo
     User git
     IdentityFile ~/.ssh/$keyname
     CertificateFile ~/.ssh/$cert_base
+${_kh_config_lines}
 EOF
         chmod 600 "$config_out"
         CONFIG_FILES+=("$config_out")
@@ -758,6 +788,9 @@ for i in "${!USERNAMES[@]}"; do
         fi
         if [[ -n "${CONFIG_FILES[$i]:-}" ]]; then
             echo "       conf: ${CONFIG_FILES[$i]}"
+        fi
+        if [[ -n "${KH_FILES[$i]:-}" ]]; then
+            echo "       kh:   ${KH_FILES[$i]}"
         fi
         if $WEB_PASSWORD && [[ -n "${WEB_PASSES[$i]:-}" ]]; then
             { set +x; } 2>/dev/null
