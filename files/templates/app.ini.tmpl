@@ -3,7 +3,9 @@ APP_NAME = Forgejo
 ; ── Repository ────────────────────────────────────────────────────────────────
 [repository]
 ; Push to a non-existent repo to create it automatically (user-owned).
-ENABLE_PUSH_CREATE_USER = true
+ENABLE_PUSH_CREATE_USER      = true
+; go get uses SSH clone URLs (matches SSH_DOMAIN alias and DISABLE_HTTP_GIT).
+GO_GET_CLONE_URL_PROTOCOL    = ssh
 ; Same for organisation-owned repos.
 ;ENABLE_PUSH_CREATE_ORG  = false
 ; Default branch name for new repos.
@@ -24,8 +26,15 @@ HTTP_PORT      = 3000
 ; Must use 127.0.0.1 explicitly — 'localhost' resolves to ::1 (IPv6) which
 ; Forgejo does not listen on, causing "connection refused" in authorized_keys lookup.
 LOCAL_ROOT_URL = http://127.0.0.1:3000/
-SSH_DOMAIN     = ${DOMAIN}
+; SSH_DOMAIN matches the Host alias in the generated SSH client config (sign-user-key.sh --batch),
+; so Forgejo emits clone URLs like git@forgejo:user/repo.git that resolve via ~/.ssh/config.
+SSH_DOMAIN     = forgejo
 SSH_PORT       = 2222
+; USE_COMPAT_SSH_URI emits scp-style git@forgejo:user/repo.git clone URLs (no explicit port).
+; The correct port (2222) comes from the SSH client config Host alias, not the URL.
+USE_COMPAT_SSH_URI                = true
+; Block HTTP(S) git protocol — all git operations must go over SSH.
+DISABLE_HTTP_GIT                  = true
 ; SSH handled by host sshd (see sshd_forgejo.conf deployed by deploy.sh).
 ; Forgejo's built-in SSH server is disabled.
 START_SSH_SERVER                  = false
@@ -51,8 +60,8 @@ PASSWD  = ${DB_PASSWORD}
 ENABLE_BASIC_AUTHENTICATION = true
 ; Self-registration disabled — admin must create accounts via sign-user-key.sh.
 DISABLE_REGISTRATION        = true
-; Require sign-in to view any page (useful for fully private instances).
-;REQUIRE_SIGNIN_VIEW                = false
+; Require sign-in to view any page.
+REQUIRE_SIGNIN_VIEW                = true
 ; Keep user email addresses private by default.
 ;DEFAULT_KEEP_EMAIL_PRIVATE         = false
 ; Allow users to create organisations.
@@ -121,7 +130,7 @@ ADAPTER  = memory
 ; ── Attachments ───────────────────────────────────────────────────────────────
 [attachment]
 ;ENABLED      = true
-;MAX_SIZE     = 4               ; MiB per file
+MAX_SIZE      = 2048            ; MiB per file
 ;MAX_FILES    = 5               ; files per upload
 
 ; ── API ───────────────────────────────────────────────────────────────────────
