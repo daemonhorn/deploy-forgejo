@@ -205,18 +205,32 @@ if [[ -z "$SRC_TOKEN" ]]; then
         _ssh_opts="-i $SSH_KEY -o StrictHostKeyChecking=no -o CanonicalizeHostname=no -o ConnectTimeout=15 -o BatchMode=yes"
     fi
     info "Generating source admin token via SSH as deploy@${_src_ip}..."
+    _tok_err="$(mktemp)"
+    # Try with --token-expiry 1h first; fall back without it (not all versions support it).
     # shellcheck disable=SC2086
     SRC_TOKEN="$(ssh $_ssh_opts "deploy@$_src_ip" \
         "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
          generate-access-token --username $_admin_user \
          --token-name mirror-src-$(date +%s) --token-expiry 1h --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
-        2>/dev/null || true)"
+        2>"$_tok_err" || true)"
     # Take only the last line in case Forgejo emits log lines before the token.
     SRC_TOKEN="$(printf '%s\n' "$SRC_TOKEN" | tail -1 | tr -d '[:space:]')"
     if [[ -z "$SRC_TOKEN" ]]; then
-        rm -f "$_src_kh"
+        # shellcheck disable=SC2086
+        SRC_TOKEN="$(ssh $_ssh_opts "deploy@$_src_ip" \
+            "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
+             generate-access-token --username $_admin_user \
+             --token-name mirror-src-$(date +%s) --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
+            2>>"$_tok_err" || true)"
+        SRC_TOKEN="$(printf '%s\n' "$SRC_TOKEN" | tail -1 | tr -d '[:space:]')"
+    fi
+    if [[ -z "$SRC_TOKEN" ]]; then
+        _tok_err_msg="$(head -3 "$_tok_err" 2>/dev/null)"
+        rm -f "$_src_kh" "$_tok_err"
+        [[ -n "$_tok_err_msg" ]] && warn "Remote error: $_tok_err_msg"
         error "Could not obtain source admin token. Pass --src-token TOKEN."
     fi
+    rm -f "$_tok_err"
     _src_resp="$(mktemp)"
     _st="$(curl -sS --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
         -H "Authorization: token $SRC_TOKEN" -o "$_src_resp" -w "%{http_code}" \
@@ -457,16 +471,32 @@ if [[ -z "$DEST_TOKEN" ]]; then
         fi
     fi
     info "Generating destination admin token via SSH as deploy@${_dst_host}..."
+    _tok_err="$(mktemp)"
+    # Try with --token-expiry 1h first; fall back without it (not all versions support it).
     # shellcheck disable=SC2086
     DEST_TOKEN="$(ssh $_dst_ssh_opts "deploy@$_dst_host" \
         "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
          generate-access-token --username $_admin_user \
          --token-name mirror-dst-$(date +%s) --token-expiry 1h --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
-        2>/dev/null || true)"
+        2>"$_tok_err" || true)"
     # Take only the last line in case Forgejo emits log lines before the token.
     DEST_TOKEN="$(printf '%s\n' "$DEST_TOKEN" | tail -1 | tr -d '[:space:]')"
-    [[ -n "$DEST_TOKEN" ]] \
-        || error "Could not obtain destination admin token. Pass --dest-token TOKEN."
+    if [[ -z "$DEST_TOKEN" ]]; then
+        # shellcheck disable=SC2086
+        DEST_TOKEN="$(ssh $_dst_ssh_opts "deploy@$_dst_host" \
+            "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
+             generate-access-token --username $_admin_user \
+             --token-name mirror-dst-$(date +%s) --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
+            2>>"$_tok_err" || true)"
+        DEST_TOKEN="$(printf '%s\n' "$DEST_TOKEN" | tail -1 | tr -d '[:space:]')"
+    fi
+    if [[ -z "$DEST_TOKEN" ]]; then
+        _tok_err_msg="$(head -3 "$_tok_err" 2>/dev/null)"
+        rm -f "$_tok_err"
+        [[ -n "$_tok_err_msg" ]] && warn "Remote error: $_tok_err_msg"
+        error "Could not obtain destination admin token. Pass --dest-token TOKEN."
+    fi
+    rm -f "$_tok_err"
     _dst_resp="$(mktemp)"
     _dt="$(curl -sS --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
         -H "Authorization: token $DEST_TOKEN" -o "$_dst_resp" -w "%{http_code}" \

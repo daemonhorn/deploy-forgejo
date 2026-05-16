@@ -191,15 +191,33 @@ if [[ -z "$ADMIN_TOKEN" ]]; then
         || _ssh_opts="$_ssh_opts -o StrictHostKeyChecking=no"
 
     info "Generating admin API token via SSH as deploy@$_ip (user: $_admin_user)..."
+    _tok_err="$(mktemp)"
+    # Try with --token-expiry 1h first; fall back without it (not all versions support it).
     # shellcheck disable=SC2086
     ADMIN_TOKEN="$(ssh $_ssh_opts "deploy@$_ip" \
         "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
          generate-access-token --username $_admin_user \
-         --token-name export-$(date +%s) --token-expiry 1h --raw 2>&1" 2>/dev/null || true)"
-    [[ -n "$ADMIN_TOKEN" ]] \
-        || error "Could not obtain admin token. Pass --admin-token TOKEN or set FORGEJO_ADMIN_TOKEN."
+         --token-name export-$(date +%s) --token-expiry 1h --raw" \
+        2>"$_tok_err" || true)"
+    ADMIN_TOKEN="$(printf '%s\n' "$ADMIN_TOKEN" | tail -1 | tr -d '[:space:]')"
+    if [[ -z "$ADMIN_TOKEN" ]]; then
+        # shellcheck disable=SC2086
+        ADMIN_TOKEN="$(ssh $_ssh_opts "deploy@$_ip" \
+            "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
+             generate-access-token --username $_admin_user \
+             --token-name export-$(date +%s) --raw" \
+            2>>"$_tok_err" || true)"
+        ADMIN_TOKEN="$(printf '%s\n' "$ADMIN_TOKEN" | tail -1 | tr -d '[:space:]')"
+    fi
+    if [[ -z "$ADMIN_TOKEN" ]]; then
+        _tok_err_msg="$(head -3 "$_tok_err" 2>/dev/null)"
+        rm -f "$_tok_err"
+        [[ -n "$_tok_err_msg" ]] && warn "Remote error: $_tok_err_msg"
+        error "Could not obtain admin token. Pass --admin-token TOKEN or set FORGEJO_ADMIN_TOKEN."
+    fi
+    rm -f "$_tok_err"
 
-    # Validate: SSH token generation silently returns error text on failure
+    # Validate the token works before proceeding
     _api_status="$(curl -sf --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
         -H "Authorization: token $ADMIN_TOKEN" \
         -o /dev/null -w "%{http_code}" \

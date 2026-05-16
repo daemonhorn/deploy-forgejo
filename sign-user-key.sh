@@ -105,12 +105,33 @@ resolve_forgejo_credentials() {
         # SSH as deploy (docker group member); root login is disabled after hardening.
         # deploy has docker group access so it can run docker exec without sudo.
         info "Generating admin API token via SSH as deploy@$_ip (admin user: $_admin_user)..."
+        local _tok_err
+        _tok_err="$(mktemp)"
+        # Try with --token-expiry 1h first; fall back without it (not all versions support it).
+        # shellcheck disable=SC2086
         ADMIN_TOKEN="$(ssh $_ssh_opts "deploy@$_ip" \
             "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
              generate-access-token --username $_admin_user \
-             --token-name sign-$(date +%s) --token-expiry 1h --raw 2>&1" 2>/dev/null || true)"
-        [[ -n "$ADMIN_TOKEN" ]] \
-            || error "Could not obtain admin token. Pass --admin-token TOKEN or set FORGEJO_ADMIN_TOKEN."
+             --token-name sign-$(date +%s) --token-expiry 1h --raw" \
+            2>"$_tok_err" || true)"
+        ADMIN_TOKEN="$(printf '%s\n' "$ADMIN_TOKEN" | tail -1 | tr -d '[:space:]')"
+        if [[ -z "$ADMIN_TOKEN" ]]; then
+            # shellcheck disable=SC2086
+            ADMIN_TOKEN="$(ssh $_ssh_opts "deploy@$_ip" \
+                "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
+                 generate-access-token --username $_admin_user \
+                 --token-name sign-$(date +%s) --raw" \
+                2>>"$_tok_err" || true)"
+            ADMIN_TOKEN="$(printf '%s\n' "$ADMIN_TOKEN" | tail -1 | tr -d '[:space:]')"
+        fi
+        if [[ -z "$ADMIN_TOKEN" ]]; then
+            local _tok_err_msg
+            _tok_err_msg="$(head -3 "$_tok_err" 2>/dev/null)"
+            rm -f "$_tok_err"
+            [[ -n "$_tok_err_msg" ]] && warn "Remote error: $_tok_err_msg"
+            error "Could not obtain admin token. Pass --admin-token TOKEN or set FORGEJO_ADMIN_TOKEN."
+        fi
+        rm -f "$_tok_err"
         info "Admin token obtained."
     fi
 }
