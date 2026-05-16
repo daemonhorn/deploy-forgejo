@@ -361,6 +361,7 @@ DESTROY_IP=""
 DESTROY_ALL=false
 LOG_FILE="${SCRIPT_DIR}/.provision-log.json"
 IP_STACK="ipv4"
+_IP_STACK_EXPLICIT=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -398,6 +399,7 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || error "--ip-stack requires ipv4|ipv6|dual"
             IP_STACK="$2"
             [[ "$IP_STACK" =~ ^(ipv4|ipv6|dual)$ ]] || error "--ip-stack must be 'ipv4', 'ipv6', or 'dual'"
+            _IP_STACK_EXPLICIT=true
             shift 2 ;;
         *)
             error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--ip-stack ipv4|ipv6|dual] [--debug]" ;;
@@ -761,6 +763,11 @@ _tfvars_for_read="$_ws_tfvars"
 [[ -f "$_tfvars_for_read" ]] || _tfvars_for_read="${TF_DIR}/terraform.tfvars"
 CURRENT_REGION="$(tfvars_get "$_tfvars_for_read" region)"
 CURRENT_PLAN="$(tfvars_get "$_tfvars_for_read" plan)"
+# Preserve ip_stack across re-runs; only override if --ip-stack was explicitly passed.
+if ! $_IP_STACK_EXPLICIT; then
+    _saved_ip_stack="$(tfvars_get "$_tfvars_for_read" ip_stack)"
+    [[ -n "$_saved_ip_stack" ]] && IP_STACK="$_saved_ip_stack"
+fi
 
 mkdir -p "$CACHE_DIR"
 
@@ -1003,9 +1010,24 @@ _apply_args=(-auto-approve -input=false)
 [[ "$WORKSPACE" != "default" ]] && _apply_args+=(-var-file="$_ws_tfvars")
 terraform apply "${_apply_args[@]}"
 
-IP="$(terraform output -raw public_ipv4)"
+IP="$(terraform output -raw public_ipv4 2>/dev/null || true)"
 IPV6="$(terraform output -raw public_ipv6 2>/dev/null || true)"
 SSH_USER="$(terraform output -raw ssh_user)"
+
+# Vultr assigns IPv6 addresses asynchronously after instance creation.
+# Retry with a state refresh for up to 90 seconds if the address is still empty.
+if [[ "$IP_STACK" != "ipv4" && -z "$IPV6" ]]; then
+    info "Waiting for IPv6 address assignment (Vultr assigns asynchronously)..."
+    for _v6_try in $(seq 1 9); do
+        sleep 10
+        terraform apply -refresh-only -auto-approve -input=false -no-color 2>/dev/null || true
+        IPV6="$(terraform output -raw public_ipv6 2>/dev/null || true)"
+        [[ -n "$IPV6" ]] && { info "IPv6 address obtained: $IPV6"; break; }
+        info "  still waiting... (${_v6_try}/9)"
+    done
+    [[ -n "$IPV6" ]] || warn "IPv6 address still empty after 90s — continuing; may need to re-run."
+fi
+
 cd "$SCRIPT_DIR"
 
 # Append provision event to the log (one JSON object per line, append-only).
@@ -1147,6 +1169,8 @@ SUDO_PREFIX=""
 # shellcheck disable=SC2086
 ssh $SSH_OPTS "${SSH_USER}@${_SSH_HOST}" \
     "${SUDO_PREFIX} DOMAIN='${DOMAIN}' \
+     IP_STACK='${IP_STACK}' \
+     IPV6='${IPV6:-}' \
      CERTBOT_EMAIL='${CERTBOT_EMAIL}' \
      CERTBOT_STAGING='${CERTBOT_STAGING}' \
      FORGEJO_ADMIN_USER='${FORGEJO_ADMIN_USER}' \

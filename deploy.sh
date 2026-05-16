@@ -2,8 +2,8 @@
 # deploy.sh — Runs on the VPS (as root) to install and start all services.
 #
 # Invoked by provision.sh via SSH. Required env vars (injected by provision.sh):
-#   DOMAIN, CERTBOT_EMAIL, FORGEJO_ADMIN_USER, FORGEJO_ADMIN_EMAIL,
-#   FORGEJO_ADMIN_PASSWORD, ADMIN_SSH_PUBLIC_KEY
+#   DOMAIN, IP_STACK, IPV6, CERTBOT_EMAIL, FORGEJO_ADMIN_USER,
+#   FORGEJO_ADMIN_EMAIL, FORGEJO_ADMIN_PASSWORD, ADMIN_SSH_PUBLIC_KEY
 #
 # Idempotent: each step checks before acting, safe to re-run.
 # -E propagates the ERR trap into functions and subshells.
@@ -323,6 +323,14 @@ if [ -n "${CERTBOT_STAGING:-}" ]; then
     warn "Certbot staging mode — certificate will NOT be browser-trusted."
 fi
 
+# Build the list of IP SANs for the certificate.
+# dual-stack: issue a cert covering both the IPv4 and IPv6 addresses so clients
+# using either address get a valid cert.  ipv4/ipv6-only: single SAN suffices.
+_certbot_ip_args=(--ip-address "${DOMAIN}")
+if [[ "${IP_STACK:-ipv4}" == "dual" && -n "${IPV6:-}" ]]; then
+    _certbot_ip_args+=(--ip-address "${IPV6}")
+fi
+
 # In staging mode always run (--force-renewal handles idempotency).
 # In production skip if a valid cert directory already exists.
 if [ -n "${CERTBOT_STAGING:-}" ] || [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
@@ -348,7 +356,7 @@ if [ -n "${CERTBOT_STAGING:-}" ] || [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; th
             --non-interactive \
             --preferred-profile shortlived \
             $CERTBOT_EXTRA \
-            --ip-address "$DOMAIN" \
+            "${_certbot_ip_args[@]}" \
     || {
         warn "Certbot failed. All captured logs:"
         certbot_dump_logs

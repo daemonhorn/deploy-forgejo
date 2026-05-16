@@ -205,12 +205,14 @@ All three providers support three IP stack modes via `--ip-stack <mode>`:
 | Mode | IPv4 firewall | IPv6 firewall | Provisioning/TLS | Notes |
 |---|---|---|---|---|
 | `ipv4` | open | closed | IPv4 | Default; backwards-compatible |
-| `dual` | open | open | IPv4 | Both addresses in Terraform output |
+| `dual` | open | open | IPv4 | Both addresses in Terraform output; cert covers both IPs |
 | `ipv6` | closed | open | IPv6 | Vultr still assigns an IPv4 address at network layer; firewall blocks it |
+
+`ip_stack` is persisted in tfvars and automatically restored on re-runs, so you only need to pass `--ip-stack` on the first provision.
 
 ### Provider-specific details
 
-- **Vultr**: `enable_ipv6 = true` adds a second IPv6 address. IPv4 is always physically present.
+- **Vultr**: `enable_ipv6 = true` adds a second IPv6 address. IPv4 is always physically present. Vultr may assign the IPv6 address asynchronously; `provision.sh` retries the state refresh for up to 90 seconds if the address is empty after `terraform apply`.
 - **AWS**: `ipv4` mode uses the account's default VPC. `dual`/`ipv6` mode creates a dedicated VPC with an Amazon-provided IPv6 /56, an IGW, and route tables (`::/0` → IGW). The default VPC cannot be assigned an IPv6 CIDR via Terraform.
 - **Azure**: A second `azurerm_public_ip` with `ip_version = "IPv6"` is created. The VNet gains a ULA `/48` (`ace:cab:deca::/48`) and subnet a `/64` (`ace:cab:deca:deed::/64`). NSG `source_address_prefix = "*"` already covers both families. Changing `ip_stack` on an existing Azure deployment requires a destroy+apply because `lifecycle { ignore_changes = [subnet] }` prevents in-place subnet prefix updates.
 
@@ -222,6 +224,8 @@ All three providers support three IP stack modes via `--ip-stack <mode>`:
 ## TLS / Domain
 
 No DNS setup required. `DOMAIN` is set to the VPS public IP directly (`DOMAIN="$IP"` in `provision.sh`). Let's Encrypt issues an IP certificate using the short-lived profile (`--preferred-profile shortlived`, 160-hour validity). IP certs are required to use this profile. The certbot renewal systemd timer runs every 12 hours to keep it current.
+
+In `dual` mode, the TLS certificate covers both the IPv4 and IPv6 addresses as separate IP SANs (`--ip-address <ipv4> --ip-address <ipv6>`), so clients using either address get a valid certificate.
 
 In `ipv6` mode, `DOMAIN` is the IPv6 address. Let's Encrypt supports IPv6 IP SANs under the shortlived profile, but the ACME HTTP-01 validator must be able to reach the server over IPv6 from the public internet.
 
