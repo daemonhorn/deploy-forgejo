@@ -174,11 +174,15 @@ if [[ -z "$SRC_TOKEN" ]]; then
             [[ -n "$_vu" ]] && _admin_user="$_vu"
         fi
     fi
-    _kh="$SCRIPT_DIR/known_hosts.deploy"
-    _ssh_opts="-i $SSH_KEY -o ConnectTimeout=15 -o BatchMode=yes"
-    [[ -f "$_kh" ]] \
-        && _ssh_opts="$_ssh_opts -o UserKnownHostsFile=$_kh -o StrictHostKeyChecking=yes" \
-        || _ssh_opts="$_ssh_opts -o StrictHostKeyChecking=no"
+    # Scan the source host key fresh rather than relying on known_hosts.deploy,
+    # which provision.sh truncates and rewrites when provisioning the destination.
+    _src_kh="$(mktemp)"
+    ssh-keyscan -T 5 "$_src_ip" >> "$_src_kh" 2>/dev/null || true
+    if [[ -s "$_src_kh" ]]; then
+        _ssh_opts="-i $SSH_KEY -o UserKnownHostsFile=$_src_kh -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o BatchMode=yes"
+    else
+        _ssh_opts="-i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes"
+    fi
     info "Generating source admin token via SSH as deploy@${_src_ip}..."
     # shellcheck disable=SC2086
     SRC_TOKEN="$(ssh $_ssh_opts "deploy@$_src_ip" \
@@ -188,8 +192,10 @@ if [[ -z "$SRC_TOKEN" ]]; then
         2>/dev/null || true)"
     # Take only the last line in case Forgejo emits log lines before the token.
     SRC_TOKEN="$(printf '%s\n' "$SRC_TOKEN" | tail -1 | tr -d '[:space:]')"
-    [[ -n "$SRC_TOKEN" ]] \
-        || error "Could not obtain source admin token. Pass --src-token TOKEN."
+    if [[ -z "$SRC_TOKEN" ]]; then
+        rm -f "$_src_kh"
+        error "Could not obtain source admin token. Pass --src-token TOKEN."
+    fi
     _src_resp="$(mktemp)"
     _st="$(curl -sS --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
         -H "Authorization: token $SRC_TOKEN" -o "$_src_resp" -w "%{http_code}" \
@@ -205,10 +211,10 @@ if [[ -z "$SRC_TOKEN" ]]; then
         elif [[ "$_st" == "401" ]]; then
             warn "  Check that the admin user exists: ssh deploy@$_src_ip docker exec -u git forgejo forgejo admin user list"
         fi
-        rm -f "$_src_resp"
+        rm -f "$_src_resp" "$_src_kh"
         error "Source token validation failed (HTTP ${_st:-no response})."
     fi
-    rm -f "$_src_resp"
+    rm -f "$_src_resp" "$_src_kh"
     info "Source admin token obtained."
 fi
 
