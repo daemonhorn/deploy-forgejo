@@ -85,6 +85,7 @@ resolve_forgejo_credentials() {
 
     if [[ -z "$ADMIN_TOKEN" ]]; then
         local _ip="${FORGEJO_URL#https://}"; _ip="${_ip#http://}"; _ip="${_ip%%/*}"
+        _ip="${_ip#[}"; _ip="${_ip%]}"   # strip brackets from IPv6 literals
         local _admin_user="gitadmin"
         if [[ -f "$SCRIPT_DIR/.vault.token" ]]; then
             export VAULT_ADDR="http://127.0.0.1:8200"
@@ -97,7 +98,7 @@ resolve_forgejo_credentials() {
         fi
         local _ssh_key="${ADMIN_SSH_KEY:-$HOME/.ssh/id_ed25519}"
         local _kh="$SCRIPT_DIR/known_hosts.deploy"
-        local _ssh_opts="-i $_ssh_key -o ConnectTimeout=15 -o BatchMode=yes"
+        local _ssh_opts="-i $_ssh_key -o CanonicalizeHostname=no -o ConnectTimeout=15 -o BatchMode=yes"
         [[ -f "$_kh" ]] \
             && _ssh_opts="$_ssh_opts -o UserKnownHostsFile=$_kh -o StrictHostKeyChecking=yes" \
             || _ssh_opts="$_ssh_opts -o StrictHostKeyChecking=no"

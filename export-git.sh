@@ -165,6 +165,7 @@ FORGEJO_URL="${FORGEJO_URL%/}"  # strip trailing slash
 # ── Resolve admin token ───────────────────────────────────────────────────────
 if [[ -z "$ADMIN_TOKEN" ]]; then
     _ip="${FORGEJO_URL#https://}"; _ip="${_ip#http://}"; _ip="${_ip%%/*}"
+    _ip="${_ip#[}"; _ip="${_ip%]}"   # strip brackets from IPv6 literals
     _admin_user="gitadmin"
 
     if [[ -f "$SCRIPT_DIR/.vault.token" ]]; then
@@ -178,7 +179,7 @@ if [[ -z "$ADMIN_TOKEN" ]]; then
     fi
 
     _kh="$SCRIPT_DIR/known_hosts.deploy"
-    _ssh_opts="-i $SSH_KEY -o ConnectTimeout=15 -o BatchMode=yes"
+    _ssh_opts="-i $SSH_KEY -o CanonicalizeHostname=no -o ConnectTimeout=15 -o BatchMode=yes"
     [[ -f "$_kh" ]] \
         && _ssh_opts="$_ssh_opts -o UserKnownHostsFile=$_kh -o StrictHostKeyChecking=yes" \
         || _ssh_opts="$_ssh_opts -o StrictHostKeyChecking=no"

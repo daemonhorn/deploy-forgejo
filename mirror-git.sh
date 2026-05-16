@@ -183,6 +183,7 @@ SRC_URL="${SRC_URL%/}"
 # ── Resolve source admin token ────────────────────────────────────────────────
 if [[ -z "$SRC_TOKEN" ]]; then
     _src_ip="${SRC_URL#https://}"; _src_ip="${_src_ip#http://}"; _src_ip="${_src_ip%%/*}"
+    _src_ip="${_src_ip#[}"; _src_ip="${_src_ip%]}"   # strip brackets from IPv6 literals
     _admin_user="gitadmin"
     if [[ -f "$SCRIPT_DIR/.vault.token" ]]; then
         export VAULT_ADDR="http://127.0.0.1:8200"
@@ -198,9 +199,9 @@ if [[ -z "$SRC_TOKEN" ]]; then
     _src_kh="$(mktemp)"
     ssh-keyscan -T 5 "$_src_ip" >> "$_src_kh" 2>/dev/null || true
     if [[ -s "$_src_kh" ]]; then
-        _ssh_opts="-i $SSH_KEY -o UserKnownHostsFile=$_src_kh -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o BatchMode=yes"
+        _ssh_opts="-i $SSH_KEY -o UserKnownHostsFile=$_src_kh -o StrictHostKeyChecking=yes -o CanonicalizeHostname=no -o ConnectTimeout=15 -o BatchMode=yes"
     else
-        _ssh_opts="-i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes"
+        _ssh_opts="-i $SSH_KEY -o StrictHostKeyChecking=no -o CanonicalizeHostname=no -o ConnectTimeout=15 -o BatchMode=yes"
     fi
     info "Generating source admin token via SSH as deploy@${_src_ip}..."
     # shellcheck disable=SC2086
@@ -419,6 +420,9 @@ DEST_URL="${DEST_URL%/}"
 # ── Safety guard: source ≠ destination ───────────────────────────────────────
 _src_host="${SRC_URL#https://}"; _src_host="${_src_host#http://}"; _src_host="${_src_host%%/*}"
 _dst_host="${DEST_URL#https://}"; _dst_host="${_dst_host#http://}"; _dst_host="${_dst_host%%/*}"
+# Strip brackets from IPv6 literals so ssh/ssh-keyscan receive bare addresses.
+_src_host="${_src_host#[}"; _src_host="${_src_host%]}"
+_dst_host="${_dst_host#[}"; _dst_host="${_dst_host%]}"
 [[ "$_src_host" != "$_dst_host" ]] \
     || error "Source and destination resolve to the same host ($_src_host). Aborting."
 
@@ -437,7 +441,7 @@ until ssh-keyscan -T 5 "$(_bare_host "$_dst_host")" >> "$_dest_kh" 2>/dev/null &
     info "  waiting for SSH on destination... (${_kh_tries}/12)"
     sleep 10
 done
-_dst_ssh_opts="-i $SSH_KEY -o UserKnownHostsFile=$_dest_kh -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o BatchMode=yes"
+_dst_ssh_opts="-i $SSH_KEY -o UserKnownHostsFile=$_dest_kh -o StrictHostKeyChecking=yes -o CanonicalizeHostname=no -o ConnectTimeout=15 -o BatchMode=yes"
 
 # ── Resolve destination admin token ───────────────────────────────────────────
 if [[ -z "$DEST_TOKEN" ]]; then
