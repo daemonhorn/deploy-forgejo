@@ -1057,9 +1057,11 @@ else
     ROOT_URL_HOST="$CONNECT_IP"
 fi
 
-# Wrap IPv6 addresses for SSH user@host syntax (ssh user@[2001:db8::1]).
-# IPv4 addresses pass through unchanged.
-_ssh_host() { [[ "$1" == *:* ]] && echo "[${1}]" || echo "$1"; }
+# ssh user@addr — bare IPv6 is fine; OpenSSH parses user@addr unambiguously.
+# scp user@addr:path — brackets required to avoid the first colon being parsed
+# as the host:path separator.
+_ssh_host() { echo "$1"; }
+_scp_host() { [[ "$1" == *:* ]] && echo "[${1}]" || echo "$1"; }
 
 info "VPS  IPv4: ${IP:-none}  IPv6: ${IPV6:-none}  Connect: $CONNECT_IP  Provider: $PROVIDER"
 
@@ -1078,6 +1080,7 @@ cat known_hosts.deploy >&2
 
 SSH_OPTS="-i $SSH_KEY -o UserKnownHostsFile=./known_hosts.deploy -o StrictHostKeyChecking=yes -o CanonicalizeHostname=no"
 _SSH_HOST="$(_ssh_host "$CONNECT_IP")"
+_SCP_HOST="$(_scp_host "$CONNECT_IP")"
 
 # On AWS, user_data configures root access after sshd is already listening.
 # Retry the actual login until it succeeds (up to 3 extra minutes).
@@ -1143,8 +1146,8 @@ if [[ "$SSH_USER" == "root" ]]; then
         files/forgejo-cert-extract.py \
         files/sshd_forgejo.conf \
         ca.pub \
-        "${SSH_USER}@${_SSH_HOST}:/opt/forgejo/"
-    scp $SSH_OPTS deploy.sh "${SSH_USER}@${_SSH_HOST}:/opt/forgejo/deploy.sh"
+        "${SSH_USER}@${_SCP_HOST}:/opt/forgejo/"
+    scp $SSH_OPTS deploy.sh "${SSH_USER}@${_SCP_HOST}:/opt/forgejo/deploy.sh"
 else
     # Re-run after hardening: SSH as deploy; /opt/forgejo is chown root:deploy g+w
     # Stage to tmp first, then sudo-move into place
@@ -1162,7 +1165,7 @@ else
         files/sshd_forgejo.conf \
         ca.pub \
         deploy.sh \
-        "deploy@${_SSH_HOST}:${STAGE_DIR}/"
+        "deploy@${_SCP_HOST}:${STAGE_DIR}/"
     ssh $SSH_OPTS "deploy@${_SSH_HOST}" \
         "sudo mv ${STAGE_DIR}/* /opt/forgejo/ && sudo rm -rf ${STAGE_DIR}"
 fi
