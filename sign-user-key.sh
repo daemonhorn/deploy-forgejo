@@ -707,6 +707,19 @@ else
         keyname="${cert_base%-cert.pub}"
         config_out="$OUTPUT_DIR/$username/config"
         cat > "$config_out" <<EOF
+# Forgejo instance: $_config_host
+# ─────────────────────────────────────────────────────────────────────────────
+# Clone a repository:
+#   git clone git@forgejo:$username/<repo>.git
+#
+# Re-derive your Forgejo web UI password (rerun after each weekly rotation):
+#   CHALLENGE="webapp-password:$_config_host:v1"
+#   echo -n "\$CHALLENGE" | ssh-keygen -Y sign -f ~/.ssh/$keyname \\
+#       -n password-derivation 2>/dev/null | grep -v '^\-----' | base64 -d | \\
+#       sha256sum | python3 -c "import sys, base64; \\
+#       d=bytes.fromhex(sys.stdin.read().split()[0]); \\
+#       print(base64.urlsafe_b64encode(d[:24]).decode().rstrip('='), end='')"
+# ─────────────────────────────────────────────────────────────────────────────
 Host forgejo
     HostName $_config_host
     Port 2222
