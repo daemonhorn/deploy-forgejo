@@ -47,6 +47,9 @@ known_hosts.deploy
 # Export archives (export-git.sh default output destination)
 archive/*.tar.zst
 
+# Batch-issued SSH keys and certs (sign-user-key.sh --batch output)
+keys/
+
 # Rendered templates (never committed; generated at deploy time)
 files/.env
 files/app.ini

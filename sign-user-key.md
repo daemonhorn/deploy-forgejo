@@ -34,6 +34,8 @@ Alice places `alice_id_ed25519-cert.pub` as `~/.ssh/id_ed25519-cert.pub` (alongs
 | `--forgejo-url URL` | Forgejo base URL (auto-detected from Terraform if omitted) |
 | `--admin-token TOKEN` | Admin API token (auto-generated via SSH if omitted) |
 | `--no-register` | Sign the cert only; skip creating the Forgejo user and registering the key |
+| `--web-password` | Derive and set a deterministic web UI password from the user's Ed25519 key (see below) |
+| `--private-key FILE` | Ed25519 private key for web password derivation; defaults to stripping `.pub` from the pubkey path |
 
 ## Batch mode
 
@@ -67,6 +69,48 @@ Auto-generated private keys must be delivered to users via a secure channel (enc
 | `--forgejo-url URL` | Forgejo base URL |
 | `--admin-token TOKEN` | Admin API token |
 | `--no-register` | Sign only; skip Forgejo registration |
+| `--no-web-password` | Skip web UI password derivation (default: on for Ed25519 keys) |
+
+## Web UI password
+
+In batch mode web UI password derivation is **on by default**. Pass `--no-web-password` to skip it.
+
+The script derives a deterministic 32-character password from each user's Ed25519 private key and the current instance's IP address, then sets it in Forgejo via the admin API. This enables users to log into the web UI with a stable, re-derivable password.
+
+**Password policy:**
+- Requires an Ed25519 key (RSA and ECDSA are not deterministically signable)
+- Tied to the instance IP — password changes with each weekly rotation (new instance = new IP)
+- After a rotation, re-run `sign-user-key.sh --batch` against the new instance to push updated passwords
+- Users can re-derive their password at any time without contacting the admin (see below)
+
+**In single-user mode**, pass `--web-password` explicitly; the private key is auto-discovered by stripping `.pub` from the pubkey path:
+```bash
+# alice_id_ed25519 and alice_id_ed25519.pub are in the same directory
+./sign-user-key.sh alice alice_id_ed25519.pub --web-password
+
+# Or pass the private key explicitly
+./sign-user-key.sh alice alice_id_ed25519.pub --web-password --private-key /path/to/private_key
+```
+
+**In batch mode** (default behaviour, suppress with `--no-web-password`), passwords are derived for:
+- Auto-generated key users (the private key is generated locally, always available)
+- File-path users where an adjacent private key exists (same path without `.pub`)
+- Users with inline public keys are skipped with a warning (no private key available)
+
+### User re-derivation recipe
+
+Users can re-derive their password at any time without the admin:
+
+```bash
+INSTANCE_IP="<current-instance-ip>"
+CHALLENGE="webapp-password:${INSTANCE_IP}:v1"
+echo -n "$CHALLENGE" | ssh-keygen -Y sign -f ~/.ssh/id_ed25519 \
+    -n password-derivation 2>/dev/null | grep -v '^-----' | base64 -d | \
+    sha256sum | python3 -c "import sys, base64; d=bytes.fromhex(sys.stdin.read().split()[0]); \
+    print(base64.urlsafe_b64encode(d[:24]).decode().rstrip('='), end='')"
+```
+
+The password output from this command is the web UI login password. Update `INSTANCE_IP` after a weekly rotation (the admin will provide the new IP).
 
 ## Certificate validity
 
@@ -104,6 +148,8 @@ The signing operation requires a physical touch on the Yubikey. In batch mode, t
 **Single-user:** the `*-cert.pub` file only. The user places it alongside their existing private key as `~/.ssh/<keyname>-cert.pub`.
 
 **Batch (auto-generated keys):** both the private key (`id_ed25519`) and the cert (`id_ed25519-cert.pub`). The private key is sensitive — send via encrypted channel.
+
+**If `--web-password` was used:** also send the web UI password and the re-derivation recipe above.
 
 **Clone URL format:**
 

@@ -19,8 +19,16 @@
 #   --admin-token TOK   Forgejo admin API token (default: auto-generated via SSH)
 #   --no-register       Sign cert(s) only; skip Forgejo user/key registration
 #
+# Single-user options:
+#   --web-password      Derive a deterministic web UI password from the user's Ed25519 key
+#                       and set it in Forgejo. Requires Ed25519 key. Password is tied to the
+#                       instance IP; rerun after weekly rotation.
+#   --private-key FILE  Ed25519 private key for web password derivation (defaults to stripping
+#                       .pub from the public key filename).
+#
 # Batch-only options:
-#   --output-dir DIR    Write keys and certs here (default: ./keys)
+#   --output-dir DIR       Write keys and certs here (default: ./keys)
+#   --no-web-password      Skip web UI password derivation (default: on for Ed25519 keys)
 #
 # Environment overrides: FORGEJO_URL, FORGEJO_ADMIN_TOKEN, ADMIN_SSH_KEY, CERT_VALIDITY
 #
@@ -53,6 +61,10 @@ ykman info &>/dev/null || error "No Yubikey detected. Connect your Yubikey and t
 VALIDITY="${CERT_VALIDITY:-+365d}"
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
+
+# Forgejo ≥7.0 requires explicit token scopes; enumerate all admin scopes so the
+# generated token can create users, register keys, and patch passwords.
+_FORGEJO_ADMIN_SCOPES="read:activitypub,write:activitypub,read:admin,write:admin,read:issue,write:issue,read:misc,write:misc,read:notification,write:notification,read:organization,write:organization,read:package,write:package,read:repository,write:repository,read:user,write:user"
 
 # Resolve Forgejo URL and admin token into FORGEJO_URL and ADMIN_TOKEN globals.
 resolve_forgejo_credentials() {
@@ -113,7 +125,7 @@ resolve_forgejo_credentials() {
         ADMIN_TOKEN="$(ssh $_ssh_opts "deploy@$_ip" \
             "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
              generate-access-token --username $_admin_user \
-             --token-name sign-$(date +%s) --token-expiry 1h --raw" \
+             --token-name sign-$(date +%s) --token-expiry 1h --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
             2> >(if [[ "${DEBUG}" == 1 ]]; then tee -a "$_tok_err" >&2; else cat >> "$_tok_err"; fi) || true)"
         ADMIN_TOKEN="$(printf '%s\n' "$ADMIN_TOKEN" | tail -1 | tr -d '[:space:]')"
         if [[ -z "$ADMIN_TOKEN" ]]; then
@@ -121,7 +133,7 @@ resolve_forgejo_credentials() {
             ADMIN_TOKEN="$(ssh $_ssh_opts "deploy@$_ip" \
                 "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
                  generate-access-token --username $_admin_user \
-                 --token-name sign-$(date +%s) --raw" \
+                 --token-name sign-$(date +%s) --scopes $_FORGEJO_ADMIN_SCOPES --raw" \
                 2> >(if [[ "${DEBUG}" == 1 ]]; then tee -a "$_tok_err" >&2; else cat >> "$_tok_err"; fi) || true)"
             ADMIN_TOKEN="$(printf '%s\n' "$ADMIN_TOKEN" | tail -1 | tr -d '[:space:]')"
         fi
@@ -205,10 +217,111 @@ print(json.dumps({
     fi
 }
 
+# Returns exit 0 if the public key file is Ed25519, exit 1 otherwise.
+_require_ed25519_pubkey() {
+    local _type; _type="$(awk '{print $1}' "$1" 2>/dev/null)"
+    [[ "$_type" == "ssh-ed25519" ]]
+}
+
+# Load the PKCS#11 CA key into ssh-agent with a single PIN prompt so batch
+# signings reuse the cached key via ssh-keygen -U instead of prompting per user.
+# On success sets _YUBIKEY_IN_AGENT=true.  Falls back gracefully if the agent is
+# unavailable or the PIN is wrong.
+#
+# Security note: the PIN is passed to ssh-add's environment as _YKPIN for the
+# duration of that one execve() call.  It is briefly visible to same-uid processes
+# via /proc/PID/environ.  Acceptable on a local admin workstation.
+_YUBIKEY_IN_AGENT=false
+_yubikey_agent_load() {
+    if [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
+        warn "No SSH agent running (SSH_AUTH_SOCK unset); PIN will be prompted per signing."
+        return
+    fi
+    printf "YubiKey PIN: "
+    { set +x; } 2>/dev/null
+    read -r -s _ypin
+    echo
+    local _ap
+    _ap="$(mktemp)"
+    chmod 700 "$_ap"
+    # The askpass script reads the PIN from _YKPIN which ssh-add inherits.
+    printf '#!/bin/sh\nprintf "%%s" "$_YKPIN"\n' > "$_ap"
+    local _rc=0
+    # set +x already active above; keep it so the PIN assignment is not traced.
+    _YKPIN="$_ypin" DISPLAY="${DISPLAY:-:0}" SSH_ASKPASS_REQUIRE=force SSH_ASKPASS="$_ap" \
+        ssh-add -s "$PKCS11_LIB" < /dev/null 2>&1 || _rc=$?
+    rm -f "$_ap"
+    unset _ypin
+    [[ "${DEBUG}" == 1 ]] && set -x
+    if [[ $_rc -eq 0 ]]; then
+        _YUBIKEY_IN_AGENT=true
+    else
+        warn "Failed to load YubiKey into agent (wrong PIN? PIV locks after 3 wrong attempts)."
+        warn "Falling back to per-signing PIN prompt."
+    fi
+}
+
+_yubikey_agent_unload() {
+    [[ "$_YUBIKEY_IN_AGENT" == true ]] || return 0
+    ssh-add -e "$PKCS11_LIB" 2>/dev/null || true
+    _YUBIKEY_IN_AGENT=false
+}
+
+# Derive a deterministic web UI password from an Ed25519 private key and an instance IP.
+# Challenge: "webapp-password:<instance_ip>:v1" — tied to the instance lifetime.
+# After weekly rotation the instance IP changes; re-run sign-user-key.sh --batch
+# (or single-user with --web-password) against the new instance to push updated passwords.
+#
+# SECURITY: The caller MUST suppress set -x before calling AND before capturing the output
+# in a variable, to prevent the password from appearing in the execution trace.
+# Args: privkey_path instance_ip
+# Outputs: 32-char URL-safe base64 password on stdout (no trailing newline)
+derive_web_password() {
+    local privkey="$1" instance_ip="$2"
+    local challenge="webapp-password:${instance_ip}:v1"
+    printf '%s' "$challenge" \
+        | ssh-keygen -Y sign -f "$privkey" -n password-derivation 2>/dev/null \
+        | grep -v '^-----' \
+        | base64 -d \
+        | sha256sum \
+        | python3 -c "import sys, base64
+d = bytes.fromhex(sys.stdin.read().split()[0])
+print(base64.urlsafe_b64encode(d[:24]).decode().rstrip('='), end='')"
+}
+
+# Set a user's web UI password via the Forgejo admin API.
+# SECURITY: The caller MUST suppress set -x; a temp file holds the plaintext password.
+# Args: username web_password
+# Sets _SET_WEB_PASS_CODE to the HTTP response code (for caller error messages).
+# Returns: 0 on HTTP 200, 1 otherwise.
+_SET_WEB_PASS_CODE=""
+set_web_password() {
+    local username="$1" password="$2"
+    local _tmp; _tmp="$(mktemp)"
+    chmod 600 "$_tmp"
+    python3 -c "
+import json, sys
+print(json.dumps({
+    'login_name':           sys.argv[1],
+    'must_change_password': False,
+    'password':             sys.argv[2],
+    'source_id':            0,
+}))" "$username" "$password" > "$_tmp"
+    local _out
+    _out="$(curl -sk -w '\n%{http_code}' \
+        -X PATCH "$FORGEJO_URL/api/v1/admin/users/$username" \
+        -H "Authorization: token $ADMIN_TOKEN" \
+        -H "Content-Type: application/json" \
+        --data-binary "@$_tmp" || true)"
+    rm -f "$_tmp"
+    _SET_WEB_PASS_CODE="${_out##*$'\n'}"
+    [[ "$_SET_WEB_PASS_CODE" == "200" ]]
+}
+
 # ── Single-user mode ──────────────────────────────────────────────────────────
 if [[ "${1:-}" != "--batch" ]]; then
-    [ "$#" -ge 2 ] || error "Usage: $0 <forgejo-username> <user-public-key-file> [--forgejo-url URL] [--admin-token TOKEN] [--no-register]
-       $0 --batch <csv-file> [--output-dir DIR] [--forgejo-url URL] [--admin-token TOKEN] [--no-register]"
+    [ "$#" -ge 2 ] || error "Usage: $0 <forgejo-username> <user-public-key-file> [--forgejo-url URL] [--admin-token TOKEN] [--no-register] [--web-password] [--private-key FILE]
+       $0 --batch <csv-file> [--output-dir DIR] [--forgejo-url URL] [--admin-token TOKEN] [--no-register] [--no-web-password]"
     USERNAME="$1"
     USER_PUBKEY="$2"
     shift 2
@@ -217,13 +330,17 @@ if [[ "${1:-}" != "--batch" ]]; then
     FORGEJO_URL="${FORGEJO_URL:-}"
     ADMIN_TOKEN="${FORGEJO_ADMIN_TOKEN:-}"
     REGISTER=true
+    WEB_PASSWORD=false
+    PRIVATE_KEY=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --forgejo-url) FORGEJO_URL="$2"; shift 2 ;;
-            --admin-token) ADMIN_TOKEN="$2"; shift 2 ;;
-            --no-register) REGISTER=false; shift ;;
-            --debug)       DEBUG=1; shift ;;
+            --forgejo-url)  FORGEJO_URL="$2"; shift 2 ;;
+            --admin-token)  ADMIN_TOKEN="$2"; shift 2 ;;
+            --no-register)  REGISTER=false; shift ;;
+            --web-password) WEB_PASSWORD=true; shift ;;
+            --private-key)  PRIVATE_KEY="$2"; shift 2 ;;
+            --debug)        DEBUG=1; shift ;;
             *) error "Unknown option: $1" ;;
         esac
     done
@@ -247,13 +364,45 @@ if [[ "${1:-}" != "--batch" ]]; then
     [ -f "$CERT_FILE" ] || CERT_FILE="${USER_PUBKEY}-cert.pub"
     [ -f "$CERT_FILE" ] || error "Certificate file not found after signing. Check ssh-keygen output above."
 
-    if $REGISTER; then
+    if $REGISTER || $WEB_PASSWORD; then
         echo
         resolve_forgejo_credentials
+    fi
+
+    if $REGISTER; then
         echo
         header "Registering in Forgejo ($FORGEJO_URL)..."
         echo
         register_user "$USERNAME" "$USER_PUBKEY" || true
+    fi
+
+    WEB_PASS=""
+    _instance_ip=""
+    if $WEB_PASSWORD; then
+        if [[ -z "$PRIVATE_KEY" ]]; then
+            _try="${USER_PUBKEY%.pub}"
+            [[ "$_try" != "$USER_PUBKEY" && -f "$_try" ]] \
+                && PRIVATE_KEY="$_try" \
+                || error "--web-password: private key not found alongside pubkey. Pass --private-key PATH."
+        fi
+        [[ -f "$PRIVATE_KEY" ]] || error "--web-password: private key file not found: $PRIVATE_KEY"
+        if _require_ed25519_pubkey "$USER_PUBKEY"; then
+            _instance_ip="${FORGEJO_URL#https://}"; _instance_ip="${_instance_ip#http://}"
+            _instance_ip="${_instance_ip%%/*}"; _instance_ip="${_instance_ip#[}"; _instance_ip="${_instance_ip%]}"
+            echo
+            info "Deriving web UI password from Ed25519 key (instance: ${_instance_ip})..."
+            { set +x; } 2>/dev/null
+            WEB_PASS="$(derive_web_password "$PRIVATE_KEY" "$_instance_ip")"
+            if set_web_password "$USERNAME" "$WEB_PASS"; then
+                info "  ✓ web UI password set in Forgejo"
+            else
+                warn "  ✗ web UI password API call failed (HTTP ${_SET_WEB_PASS_CODE:-no response}); skipping"
+                WEB_PASS=""
+            fi
+            [[ "${DEBUG}" == 1 ]] && set -x
+        else
+            warn "--web-password: not an Ed25519 key; password derivation requires Ed25519. Skipping."
+        fi
     fi
 
     echo
@@ -272,6 +421,23 @@ if [[ "${1:-}" != "--batch" ]]; then
         echo "       (Settings → SSH / GPG Keys → Add Key)."
     fi
     echo "    3. Clone with:  git clone ssh://git@<ip>:2222/<username>/<repo>.git"
+    if [[ -n "$WEB_PASS" ]]; then
+        { set +x; } 2>/dev/null
+        echo
+        echo "  Web UI access:"
+        printf "    Password:  %s\n" "$WEB_PASS"
+        printf "    Login URL: %s\n" "$FORGEJO_URL"
+        echo
+        echo "  $USERNAME can re-derive this password with:"
+        printf "    CHALLENGE=\"webapp-password:%s:v1\"\n" "$_instance_ip"
+        cat << 'REDERIVE'
+    echo -n "$CHALLENGE" | ssh-keygen -Y sign -f ~/.ssh/id_ed25519 \
+        -n password-derivation 2>/dev/null | grep -v '^-----' | base64 -d | \
+        sha256sum | python3 -c "import sys, base64; d=bytes.fromhex(sys.stdin.read().split()[0]); \
+        print(base64.urlsafe_b64encode(d[:24]).decode().rstrip('='), end='')"
+REDERIVE
+        [[ "${DEBUG}" == 1 ]] && set -x
+    fi
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     exit 0
 fi
@@ -286,14 +452,16 @@ OUTPUT_DIR="./keys"
 FORGEJO_URL="${FORGEJO_URL:-}"
 ADMIN_TOKEN="${FORGEJO_ADMIN_TOKEN:-}"
 REGISTER=true
+WEB_PASSWORD=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --output-dir)  OUTPUT_DIR="$2"; shift 2 ;;
-        --forgejo-url) FORGEJO_URL="$2"; shift 2 ;;
-        --admin-token) ADMIN_TOKEN="$2"; shift 2 ;;
-        --no-register) REGISTER=false; shift ;;
-        --debug)       DEBUG=1; shift ;;
+        --output-dir)      OUTPUT_DIR="$2"; shift 2 ;;
+        --forgejo-url)     FORGEJO_URL="$2"; shift 2 ;;
+        --admin-token)     ADMIN_TOKEN="$2"; shift 2 ;;
+        --no-register)     REGISTER=false; shift ;;
+        --no-web-password) WEB_PASSWORD=false; shift ;;
+        --debug)           DEBUG=1; shift ;;
         *) error "Unknown option: $1" ;;
     esac
 done
@@ -386,7 +554,14 @@ VALID_COUNT=0
 for pf in "${PUBKEY_FILES[@]}"; do [[ -n "$pf" ]] && VALID_COUNT=$((VALID_COUNT + 1)); done
 
 header "Signing $VALID_COUNT key(s) with Yubikey (validity: $VALIDITY)"
-warn "Touch is cached for 15 s — you may need to touch the Yubikey multiple times."
+_yubikey_agent_load
+if [[ "$_YUBIKEY_IN_AGENT" == true ]]; then
+    info "PIN accepted. Touch the Yubikey when prompted (cached 15 s between signings)."
+    _sign_extra=(-U)
+else
+    warn "Touch is cached for 15 s — you may need to touch the Yubikey multiple times."
+    _sign_extra=(-D "$PKCS11_LIB")
+fi
 echo
 
 declare -a CERT_FILES=()
@@ -411,7 +586,7 @@ for i in "${!USERNAMES[@]}"; do
     info "  Signing '$username'..."
     if ssh-keygen \
             -s ca.pub \
-            -D "$PKCS11_LIB" \
+            "${_sign_extra[@]}" \
             -I "${username}@forgejo" \
             -n "git" \
             -V "$VALIDITY" \
@@ -436,16 +611,25 @@ for i in "${!USERNAMES[@]}"; do
     fi
 done
 
+_yubikey_agent_unload
+
 echo
 
-# ── Register in Forgejo ───────────────────────────────────────────────────────
+# ── Register in Forgejo and set web passwords ─────────────────────────────────
 declare -a REGISTER_FAILED=()
+declare -a WEB_PASSES=()
+_instance_ip=""
 
-if $REGISTER; then
+if $REGISTER || $WEB_PASSWORD; then
     resolve_forgejo_credentials
     echo
     header "Registering in Forgejo ($FORGEJO_URL)..."
     echo
+
+    if $WEB_PASSWORD; then
+        _instance_ip="${FORGEJO_URL#https://}"; _instance_ip="${_instance_ip#http://}"
+        _instance_ip="${_instance_ip%%/*}"; _instance_ip="${_instance_ip#[}"; _instance_ip="${_instance_ip%]}"
+    fi
 
     for i in "${!USERNAMES[@]}"; do
         username="${USERNAMES[$i]}"
@@ -454,7 +638,134 @@ if $REGISTER; then
 
         [[ -n "$pubkey" && -n "$cert" ]] || continue
 
-        register_user "$username" "$pubkey" || REGISTER_FAILED+=("$username")
+        if $REGISTER; then
+            register_user "$username" "$pubkey" || REGISTER_FAILED+=("$username")
+        fi
+
+        WEB_PASSES[$i]=""
+        if $WEB_PASSWORD; then
+            _priv=""
+            if [[ "${IS_AUTO_GENERATED[$i]}" == "true" ]]; then
+                _priv="$OUTPUT_DIR/$username/id_ed25519"
+            else
+                _try="${pubkey%.pub}"
+                [[ "$_try" != "$pubkey" && -f "$_try" ]] && _priv="$_try"
+            fi
+            if [[ -z "$_priv" || ! -f "$_priv" ]]; then
+                warn "    ✗ web password skipped (no private key file found)"
+            elif ! _require_ed25519_pubkey "$pubkey"; then
+                warn "    ✗ web password skipped (key type is not Ed25519)"
+            else
+                { set +x; } 2>/dev/null
+                _wp="$(derive_web_password "$_priv" "$_instance_ip")"
+                if set_web_password "$username" "$_wp"; then
+                    info "    ✓ web UI password set"
+                    WEB_PASSES[$i]="$_wp"
+                else
+                    warn "    ✗ web UI password API call failed (HTTP ${_SET_WEB_PASS_CODE:-no response})"
+                fi
+                [[ "${DEBUG}" == 1 ]] && set -x
+            fi
+        fi
+    done
+fi
+
+# ── Write SSH client config ────────────────────────────────────────────────────
+# Resolve HostName from FORGEJO_URL if already known; fall back to Terraform
+# output so config files are written even when --no-register is passed.
+_config_host=""
+if [[ -n "${FORGEJO_URL:-}" ]]; then
+    _config_host="${FORGEJO_URL#https://}"; _config_host="${_config_host#http://}"
+    _config_host="${_config_host%%/*}"; _config_host="${_config_host#[}"; _config_host="${_config_host%]}"
+elif command -v terraform &>/dev/null; then
+    _last_provider=""; [[ -f "$SCRIPT_DIR/.last-provider" ]] && \
+        _last_provider="$(tr -d '[:space:]' < "$SCRIPT_DIR/.last-provider")"
+    _ch_dirs=("$SCRIPT_DIR/terraform/vultr")
+    [[ -n "$_last_provider" ]] && \
+        _ch_dirs=("$SCRIPT_DIR/terraform/$_last_provider" "$SCRIPT_DIR/terraform/vultr")
+    for _ch_dir in "${_ch_dirs[@]}"; do
+        [[ -d "$_ch_dir" ]] || continue
+        _ch="$(cd "$_ch_dir" && terraform output -raw public_ipv4 2>/dev/null || true)"
+        [[ -z "$_ch" ]] && _ch="$(cd "$_ch_dir" && terraform output -raw public_ipv6 2>/dev/null || true)"
+        [[ -n "$_ch" ]] && { _config_host="$_ch"; break; }
+    done
+fi
+
+declare -a CONFIG_FILES=()
+declare -a KH_FILES=()
+
+if [[ -z "$_config_host" ]]; then
+    warn "Instance IP unknown — SSH config files skipped. Pass --forgejo-url to generate them."
+    for i in "${!USERNAMES[@]}"; do CONFIG_FILES+=(""); KH_FILES+=(""); done
+else
+    echo
+    header "Writing SSH client configs (HostName: $_config_host)..."
+    echo
+
+    # Scan host keys once; all users share the same fingerprint.
+    info "Scanning SSH host keys at [$_config_host]:2222..."
+    _kh_content="$(ssh-keyscan -p 2222 -T 10 "$_config_host" 2>/dev/null || true)"
+    if [[ -z "$_kh_content" ]]; then
+        warn "ssh-keyscan returned nothing — known_hosts.forgejo will be omitted."
+    fi
+
+    for i in "${!USERNAMES[@]}"; do
+        cert="${CERT_FILES[$i]:-}"
+        username="${USERNAMES[$i]}"
+        if [[ -z "$cert" ]]; then
+            CONFIG_FILES+=("")
+            KH_FILES+=("")
+            continue
+        fi
+        # Derive IdentityFile from the cert name: strip -cert.pub suffix.
+        # After copying the folder to ~/.ssh/ the private key lives at this path.
+        cert_base="$(basename "$cert")"
+        keyname="${cert_base%-cert.pub}"
+
+        # Write known_hosts.forgejo when keyscan succeeded.
+        _kh_out=""
+        _kh_config_lines=""
+        if [[ -n "$_kh_content" ]]; then
+            _kh_out="$OUTPUT_DIR/$username/known_hosts.forgejo"
+            {
+                printf '# SSH host fingerprints for forgejo (%s:2222)\n' "$_config_host"
+                printf '# Place alongside ~/.ssh/config; referenced by UserKnownHostsFile.\n'
+                printf '%s\n' "$_kh_content"
+            } > "$_kh_out"
+            chmod 644 "$_kh_out"
+            KH_FILES+=("$_kh_out")
+            _kh_config_lines="    UserKnownHostsFile ~/.ssh/known_hosts.forgejo
+    StrictHostKeyChecking yes"
+        else
+            KH_FILES+=("")
+        fi
+
+        config_out="$OUTPUT_DIR/$username/config"
+        cat > "$config_out" <<EOF
+# Forgejo instance: $_config_host
+# ─────────────────────────────────────────────────────────────────────────────
+# Clone a repository:
+#   git clone git@forgejo:$username/<repo>.git
+#
+# Re-derive your Forgejo web UI password (rerun after each weekly rotation):
+#   CHALLENGE="webapp-password:$_config_host:v1"
+#   echo -n "\$CHALLENGE" | ssh-keygen -Y sign -f ~/.ssh/$keyname \\
+#       -n password-derivation 2>/dev/null | grep -v '^\-----' | base64 -d | \\
+#       sha256sum | python3 -c "import sys, base64; \\
+#       d=bytes.fromhex(sys.stdin.read().split()[0]); \\
+#       print(base64.urlsafe_b64encode(d[:24]).decode().rstrip('='), end='')"
+# ─────────────────────────────────────────────────────────────────────────────
+Host forgejo
+    HostName $_config_host
+    Port 2222
+    User git
+    IdentityFile ~/.ssh/$keyname
+    CertificateFile ~/.ssh/$cert_base
+${_kh_config_lines}
+EOF
+        chmod 600 "$config_out"
+        CONFIG_FILES+=("$config_out")
+        info "  ✓ $username → $config_out"
     done
 fi
 
@@ -481,6 +792,17 @@ for i in "${!USERNAMES[@]}"; do
         if [[ "$auto" == "true" ]]; then
             echo "       key:  ${cert%-cert.pub}  ← send to user via secure channel"
         fi
+        if [[ -n "${CONFIG_FILES[$i]:-}" ]]; then
+            echo "       conf: ${CONFIG_FILES[$i]}"
+        fi
+        if [[ -n "${KH_FILES[$i]:-}" ]]; then
+            echo "       kh:   ${KH_FILES[$i]}"
+        fi
+        if $WEB_PASSWORD && [[ -n "${WEB_PASSES[$i]:-}" ]]; then
+            { set +x; } 2>/dev/null
+            printf "       web:  %s  ← Forgejo web UI password\n" "${WEB_PASSES[$i]}"
+            [[ "${DEBUG}" == 1 ]] && set -x
+        fi
     fi
 done
 
@@ -492,9 +814,25 @@ fi
 
 echo
 echo "  Each user needs:"
-echo "    *-cert.pub  → place as ~/.ssh/<keyname>-cert.pub alongside their private key"
+if [[ -n "${_config_host:-}" ]]; then
+    echo "    Copy $OUTPUT_DIR/<username>/ to ~/.ssh/ (merge config into existing if needed)."
+    echo "    Then clone with: git clone git@forgejo:<username>/<repo>.git"
+else
+    echo "    *-cert.pub  → place as ~/.ssh/<keyname>-cert.pub alongside their private key"
+fi
 if [[ "${IS_AUTO_GENERATED[*]:-}" == *true* ]]; then
     echo "    id_ed25519  → send private key to user via secure channel (e.g. encrypted email)"
 fi
 $REGISTER && echo "  (Public keys registered in Forgejo — users can clone immediately after receiving cert)"
+if $WEB_PASSWORD && [[ -n "${_instance_ip:-}" ]]; then
+    echo
+    echo "  Web UI password re-derivation (update INSTANCE_IP after a weekly rotation):"
+    printf "    CHALLENGE=\"webapp-password:%s:v1\"\n" "$_instance_ip"
+    cat << 'REDERIVE'
+    echo -n "$CHALLENGE" | ssh-keygen -Y sign -f ~/.ssh/id_ed25519 \
+        -n password-derivation 2>/dev/null | grep -v '^-----' | base64 -d | \
+        sha256sum | python3 -c "import sys, base64; d=bytes.fromhex(sys.stdin.read().split()[0]); \
+        print(base64.urlsafe_b64encode(d[:24]).decode().rstrip('='), end='')"
+REDERIVE
+fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
