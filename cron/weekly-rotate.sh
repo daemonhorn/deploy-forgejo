@@ -46,6 +46,10 @@ log "=== Weekly rotation start: provider=$PROVIDER region=$REGION plan=$PLAN ===
 # internally and we need to know where to point the destroy at the end.
 OLD_WORKSPACE="$(cd "$TF_DIR" && terraform workspace show 2>/dev/null || echo "default")"
 OLD_IP="$(cd "$TF_DIR" && terraform output -raw public_ipv4 2>/dev/null || true)"
+if [[ -z "$OLD_IP" ]]; then
+    _old_ipv6="$(cd "$TF_DIR" && terraform output -raw public_ipv6 2>/dev/null || true)"
+    [[ -n "$_old_ipv6" ]] && OLD_IP="[${_old_ipv6}]"
+fi
 log "Old workspace: $OLD_WORKSPACE  IP: ${OLD_IP:-unknown}"
 
 # ── Step 2: Provision new instance and mirror repositories ────────────────────
@@ -90,7 +94,11 @@ fi
 # Retrieve the new instance's IP from its Terraform workspace output.
 NEW_IP="$(cd "$TF_DIR" && \
     terraform workspace select "$NEW_WORKSPACE" >/dev/null 2>&1 && \
-    terraform output -raw public_ipv4 2>/dev/null)"
+    terraform output -raw public_ipv4 2>/dev/null || true)"
+if [[ -z "$NEW_IP" ]]; then
+    _new_ipv6="$(cd "$TF_DIR" && terraform output -raw public_ipv6 2>/dev/null || true)"
+    [[ -n "$_new_ipv6" ]] && NEW_IP="[${_new_ipv6}]"
+fi
 
 log "New workspace: $NEW_WORKSPACE  IP: $NEW_IP"
 
