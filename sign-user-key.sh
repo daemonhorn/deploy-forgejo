@@ -289,7 +289,9 @@ print(base64.urlsafe_b64encode(d[:24]).decode().rstrip('='), end='')"
 # Set a user's web UI password via the Forgejo admin API.
 # SECURITY: The caller MUST suppress set -x; a temp file holds the plaintext password.
 # Args: username web_password
+# Sets _SET_WEB_PASS_CODE to the HTTP response code (for caller error messages).
 # Returns: 0 on HTTP 200, 1 otherwise.
+_SET_WEB_PASS_CODE=""
 set_web_password() {
     local username="$1" password="$2"
     local _tmp; _tmp="$(mktemp)"
@@ -302,14 +304,15 @@ print(json.dumps({
     'password':             sys.argv[2],
     'source_id':            0,
 }))" "$username" "$password" > "$_tmp"
-    local _code
-    _code="$(curl -sk -o /dev/null -w '%{http_code}' \
+    local _out
+    _out="$(curl -sk -w '\n%{http_code}' \
         -X PATCH "$FORGEJO_URL/api/v1/admin/users/$username" \
         -H "Authorization: token $ADMIN_TOKEN" \
         -H "Content-Type: application/json" \
         --data-binary "@$_tmp" || true)"
     rm -f "$_tmp"
-    [[ "$_code" == "200" ]]
+    _SET_WEB_PASS_CODE="${_out##*$'\n'}"
+    [[ "$_SET_WEB_PASS_CODE" == "200" ]]
 }
 
 # ── Single-user mode ──────────────────────────────────────────────────────────
@@ -390,7 +393,7 @@ if [[ "${1:-}" != "--batch" ]]; then
             if set_web_password "$USERNAME" "$WEB_PASS"; then
                 info "  ✓ web UI password set in Forgejo"
             else
-                warn "  ✗ web UI password API call failed; skipping"
+                warn "  ✗ web UI password API call failed (HTTP ${_SET_WEB_PASS_CODE:-no response}); skipping"
                 WEB_PASS=""
             fi
             [[ "${DEBUG}" == 1 ]] && set -x
@@ -656,7 +659,7 @@ if $REGISTER || $WEB_PASSWORD; then
                     info "    ✓ web UI password set"
                     WEB_PASSES[$i]="$_wp"
                 else
-                    warn "    ✗ web UI password API call failed"
+                    warn "    ✗ web UI password API call failed (HTTP ${_SET_WEB_PASS_CODE:-no response})"
                 fi
                 [[ "${DEBUG}" == 1 ]] && set -x
             fi
