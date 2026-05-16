@@ -20,6 +20,7 @@ Install on the local machine before running `setup.sh`:
 | `vault` | [HashiCorp install](https://developer.hashicorp.com/vault/install) |
 | `terraform` | [HashiCorp install](https://developer.hashicorp.com/terraform/install) (>= 1.5) |
 | `envsubst` | `apt install gettext-base` |
+| `zstd` | `apt install zstd` (required by `export-git.sh`) |
 | `openssl`, `ssh-keygen`, `ssh`, `scp` | standard packages |
 
 You also need cloud provider credentials:
@@ -164,6 +165,131 @@ carol,ssh-ed25519 AAAAC3Nz...            # inline public key string
 - Their private key (auto-generated users only) — send via a secure channel
 - No Forgejo web UI action needed; the admin API registration handles key lookup
 
+## Exporting repositories
+
+`export-git.sh` clones every Forgejo repository (including wikis that have content) to a timestamped `tar.zst` archive. Each repository is a bare mirror clone — all branches, tags, and PR refs are included.
+
+```bash
+./export-git.sh                          # auto-detects URL + token; writes to ./archive/
+./export-git.sh --output /backups/forgejo-$(date +%Y%m%d).tar.zst
+./export-git.sh --forgejo-url https://<ip> --admin-token TOKEN --quiet   # cron-safe
+```
+
+Default output: `./archive/forgejo-export-YYYYMMDD-HHMMSS.tar.zst` (gitignored).
+
+**Archive layout:**
+```
+forgejo-export-<timestamp>/
+  metadata.json          # server URL, version, repo count, timestamp
+  repositories.json      # full repo index with metadata
+  repos/
+    <owner>/<repo>.git/        # bare mirror clone
+    <owner>/<repo>.wiki.git/   # wiki (when it has pages)
+```
+
+**Restoring to a new Forgejo instance:**
+```bash
+tar -I zstd -xf forgejo-export-<timestamp>.tar.zst
+cd forgejo-export-<timestamp>/repos
+for repo in */*.git; do
+    git -C "$repo" remote set-url origin https://<new-host>/${repo%.git}.git
+    git -C "$repo" push --mirror
+done
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--forgejo-url URL` | Derived from `terraform output` | Forgejo base URL |
+| `--admin-token TOKEN` | Auto-generated via SSH | Forgejo admin API token |
+| `--output FILE` | `./archive/forgejo-export-TIMESTAMP.tar.zst` | Archive path |
+| `--compression LEVEL` | `3` | zstd level 1–19 |
+| `--no-wikis` | — | Skip wiki repositories |
+| `--no-archived` | — | Exclude archived repositories |
+| `--insecure` | — | Skip TLS verification |
+| `--quiet` | — | Suppress progress output (errors still go to stderr) |
+
+## Rolling rotation and migration
+
+`mirror-git.sh` mirrors recently-active repositories from one Forgejo instance to another. Used for weekly rolling rotation (provision fresh instance → mirror → destroy old) or one-off migrations.
+
+**Auto-provision destination and mirror:**
+```bash
+./mirror-git.sh \
+    --dest-provider vultr --dest-region ewr --dest-plan vc2-2c-2gb
+```
+
+**Target an existing destination instance:**
+```bash
+./mirror-git.sh --dest-url https://DEST_IP --days 14
+```
+
+**Fully explicit (cron-safe):**
+```bash
+./mirror-git.sh \
+    --src-url https://SRC_IP --src-token TOKEN \
+    --dest-url https://DEST_IP --dest-token TOKEN \
+    --quiet
+```
+
+Only repositories updated within `--days` (default: 7) are mirrored. Wikis with no pages are silently skipped. On failure the source instance is left running untouched.
+
+**Key options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--src-url URL` | Derived from Terraform | Source Forgejo URL |
+| `--src-token TOKEN` | Auto-generated via SSH | Source admin API token |
+| `--dest-provider NAME` | — | Cloud provider for auto-provisioned destination |
+| `--dest-region REGION` | — | Region for auto-provisioned destination |
+| `--dest-plan PLAN` | — | Instance plan for auto-provisioned destination |
+| `--dest-url URL` | — | Use an existing destination (skip provisioning) |
+| `--dest-token TOKEN` | Auto-generated via SSH | Destination admin API token |
+| `--days N` | `7` | Mirror repos updated in the last N days |
+| `--no-wikis` | — | Skip wiki repositories |
+| `--insecure` | — | Skip TLS verification |
+| `--quiet` | — | Suppress progress output |
+
+## Automated operations (cron)
+
+`crontab.example` contains ready-to-use cron entries for unattended operation. Install with:
+
+```bash
+crontab < crontab.example          # replaces your existing crontab
+# or
+crontab -e                         # paste/merge manually
+```
+
+Create the required directories first:
+```bash
+mkdir -p /var/backups/forgejo /var/log/forgejo
+chmod 700 /var/backups/forgejo
+```
+
+**Twice-daily export** (`cron/daily-export.sh`) — runs at 03:00 and 15:00 UTC:
+
+Calls `export-git.sh` and writes archives to `FORGEJO_BACKUP_DIR` (default: `/var/backups/forgejo`). Retains the 14 most recent archives (7 days at twice-daily cadence); older ones are pruned automatically. Adjust `KEEP=` inside the script to change retention.
+
+**Weekly rolling rotation** (`cron/weekly-rotate.sh`) — runs at 02:00 UTC every Sunday:
+
+1. Records the current instance's workspace and IP
+2. Calls `mirror-git.sh` to provision a fresh instance and sync repos updated in the past 7 days
+3. Verifies the new instance returns HTTP 200/302 on its HTTPS endpoint
+4. Destroys the old instance **only if** verification passes
+5. Switches the active Terraform workspace to the new instance
+
+On any failure the old instance is left running and the error is logged. The new instance workspace is always recorded in `.provision-log.json` for manual cleanup if needed.
+
+Configure provider/region/plan via environment variables in `crontab.example`:
+```
+ROTATE_PROVIDER=vultr
+ROTATE_REGION=ewr
+ROTATE_PLAN=vc2-2c-2gb
+```
+
+**Why rotate weekly?** Let's Encrypt short-lived IP certificates expire in ~160 hours (~6.7 days). Weekly rotation ensures the certbot issuance path is exercised regularly, surfaces Terraform drift before it becomes an emergency, and automatically rotates TLS certificates and SSH host keys.
+
 ## SSH auth internals
 
 Port 2222 runs a dedicated sshd instance (`sshd-forgejo.service`) configured with:
@@ -178,16 +304,24 @@ Port 2222 runs a dedicated sshd instance (`sshd-forgejo.service`) configured wit
 
 ```
 setup.sh                        # First run: Yubikey + Vault init
-provision.sh                    # Deploy / reprovision (--provider vultr|aws)
-deploy.sh                       # Runs on VPS via SSH
+provision.sh                    # Deploy / reprovision / destroy instances
+deploy.sh                       # Runs on VPS via SSH (called by provision.sh)
 sign-user-key.sh                # Issue SSH cert for a user (single or batch)
+export-git.sh                   # Export all repos to a tar.zst archive
+mirror-git.sh                   # Mirror repos between Forgejo instances
 vault.hcl                       # Vault server config (file backend)
 ca.pub                          # SSH CA public key (committed; deployed to VPS)
+crontab.example                 # Ready-to-use cron entries for unattended operation
+cron/
+  daily-export.sh               # Twice-daily backup via export-git.sh
+  weekly-rotate.sh              # Weekly rolling instance rotation via mirror-git.sh
+archive/                        # Default output directory for export-git.sh (gitignored)
 terraform/
-  main.tf                       # Vultr Terraform root
-  variables.tf
-  outputs.tf
-  terraform.tfvars.example
+  vultr/                        # Vultr Terraform root
+    main.tf
+    variables.tf
+    outputs.tf
+    terraform.tfvars.example
   aws/                          # AWS Terraform root
     main.tf
     variables.tf

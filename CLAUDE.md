@@ -53,9 +53,16 @@ Automates deployment of a [Forgejo](https://forgejo.org/) container instance on 
 
 **Export / backup all repositories:**
 ```
-./export-git.sh                          # auto-detects URL + token; interactive
+./export-git.sh                          # auto-detects URL + token; writes to ./archive/
 ./export-git.sh --output backup.tar.zst  # explicit output file
 ./export-git.sh --forgejo-url https://IP --admin-token TOKEN --output backup.tar.zst  # unattended/cron
+```
+
+**Automated cron operations:**
+```
+crontab < crontab.example                # install cron jobs (twice-daily export + weekly rotation)
+# cron/daily-export.sh  — calls export-git.sh; writes to /var/backups/forgejo; prunes to 14 archives
+# cron/weekly-rotate.sh — provisions fresh instance, mirrors, verifies, destroys old
 ```
 
 ## Architecture
@@ -114,8 +121,12 @@ Forgejo's **built-in SSH server is disabled** (`START_SSH_SERVER = false`). A se
 | `provision.sh` | Orchestrates terraform + deploy; reads all secrets from Vault |
 | `deploy.sh` | Remote: installs Docker, configures host sshd, issues cert, starts services |
 | `sign-user-key.sh` | Signs a user SSH key with the Yubikey CA via PKCS#11 |
-| `export-git.sh` | Exports all Forgejo repositories to a portable tar.zst archive (cron-safe) |
+| `export-git.sh` | Exports all Forgejo repositories to a portable tar.zst archive; default output in `archive/` |
 | `mirror-git.sh` | Mirrors recently-active repos to a new Forgejo instance (cron-safe) |
+| `cron/daily-export.sh` | Cron wrapper: calls `export-git.sh`, writes to `/var/backups/forgejo`, prunes old archives |
+| `cron/weekly-rotate.sh` | Cron wrapper: provisions fresh instance, mirrors, verifies health, destroys old |
+| `crontab.example` | Ready-to-use crontab (twice-daily export + weekly rotation) |
+| `archive/` | Default output directory for `export-git.sh` (tracked via `.gitkeep`; contents gitignored) |
 | `files/forgejo-keys.sh` | Deployed to VPS; called by sshd AuthorizedKeysCommand |
 | `files/forgejo-cert-extract.py` | Parses SSH cert binary to extract base public key |
 | `files/sshd_forgejo.conf` | sshd config for port-2222 Forgejo SSH daemon |
