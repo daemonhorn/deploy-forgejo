@@ -18,14 +18,17 @@
 #   --forgejo-url URL   Forgejo base URL (default: https://<terraform output ip>)
 #   --admin-token TOK   Forgejo admin API token (default: auto-generated via SSH)
 #   --no-register       Sign cert(s) only; skip Forgejo user/key registration
-#   --web-password      Derive a deterministic password from the user's Ed25519 key and set
-#                       it in Forgejo, enabling web UI login. Requires Ed25519 keys.
-#                       Password is tied to the instance IP; rerun after weekly rotation.
-#   --private-key FILE  Ed25519 private key for web password derivation. In single-user mode,
-#                       defaults to stripping .pub from the public key filename.
+#
+# Single-user options:
+#   --web-password      Derive a deterministic web UI password from the user's Ed25519 key
+#                       and set it in Forgejo. Requires Ed25519 key. Password is tied to the
+#                       instance IP; rerun after weekly rotation.
+#   --private-key FILE  Ed25519 private key for web password derivation (defaults to stripping
+#                       .pub from the public key filename).
 #
 # Batch-only options:
-#   --output-dir DIR    Write keys and certs here (default: ./keys)
+#   --output-dir DIR       Write keys and certs here (default: ./keys)
+#   --no-web-password      Skip web UI password derivation (default: on for Ed25519 keys)
 #
 # Environment overrides: FORGEJO_URL, FORGEJO_ADMIN_TOKEN, ADMIN_SSH_KEY, CERT_VALIDITY
 #
@@ -266,8 +269,8 @@ _yubikey_agent_unload() {
 
 # Derive a deterministic web UI password from an Ed25519 private key and an instance IP.
 # Challenge: "webapp-password:<instance_ip>:v1" — tied to the instance lifetime.
-# After weekly rotation the instance IP changes; re-run sign-user-key.sh --web-password
-# to push the new password to the new instance.
+# After weekly rotation the instance IP changes; re-run sign-user-key.sh --batch
+# (or single-user with --web-password) against the new instance to push updated passwords.
 #
 # SECURITY: The caller MUST suppress set -x before calling AND before capturing the output
 # in a variable, to prevent the password from appearing in the execution trace.
@@ -318,7 +321,7 @@ print(json.dumps({
 # ── Single-user mode ──────────────────────────────────────────────────────────
 if [[ "${1:-}" != "--batch" ]]; then
     [ "$#" -ge 2 ] || error "Usage: $0 <forgejo-username> <user-public-key-file> [--forgejo-url URL] [--admin-token TOKEN] [--no-register] [--web-password] [--private-key FILE]
-       $0 --batch <csv-file> [--output-dir DIR] [--forgejo-url URL] [--admin-token TOKEN] [--no-register] [--web-password]"
+       $0 --batch <csv-file> [--output-dir DIR] [--forgejo-url URL] [--admin-token TOKEN] [--no-register] [--no-web-password]"
     USERNAME="$1"
     USER_PUBKEY="$2"
     shift 2
@@ -449,16 +452,16 @@ OUTPUT_DIR="./keys"
 FORGEJO_URL="${FORGEJO_URL:-}"
 ADMIN_TOKEN="${FORGEJO_ADMIN_TOKEN:-}"
 REGISTER=true
-WEB_PASSWORD=false
+WEB_PASSWORD=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --output-dir)   OUTPUT_DIR="$2"; shift 2 ;;
-        --forgejo-url)  FORGEJO_URL="$2"; shift 2 ;;
-        --admin-token)  ADMIN_TOKEN="$2"; shift 2 ;;
-        --no-register)  REGISTER=false; shift ;;
-        --web-password) WEB_PASSWORD=true; shift ;;
-        --debug)        DEBUG=1; shift ;;
+        --output-dir)      OUTPUT_DIR="$2"; shift 2 ;;
+        --forgejo-url)     FORGEJO_URL="$2"; shift 2 ;;
+        --admin-token)     ADMIN_TOKEN="$2"; shift 2 ;;
+        --no-register)     REGISTER=false; shift ;;
+        --no-web-password) WEB_PASSWORD=false; shift ;;
+        --debug)           DEBUG=1; shift ;;
         *) error "Unknown option: $1" ;;
     esac
 done

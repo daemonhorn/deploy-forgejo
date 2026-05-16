@@ -69,19 +69,21 @@ Auto-generated private keys must be delivered to users via a secure channel (enc
 | `--forgejo-url URL` | Forgejo base URL |
 | `--admin-token TOKEN` | Admin API token |
 | `--no-register` | Sign only; skip Forgejo registration |
-| `--web-password` | Derive and set a deterministic web UI password for each user (Ed25519 keys only; auto-generated users always get a password) |
+| `--no-web-password` | Skip web UI password derivation (default: on for Ed25519 keys) |
 
-## Web UI password (`--web-password`)
+## Web UI password
 
-When `--web-password` is passed, the script derives a deterministic 32-character password from each user's Ed25519 private key and the current instance's IP address, then sets it in Forgejo via the admin API. This enables users to log into the web UI with a stable, re-derivable password.
+In batch mode web UI password derivation is **on by default**. Pass `--no-web-password` to skip it.
+
+The script derives a deterministic 32-character password from each user's Ed25519 private key and the current instance's IP address, then sets it in Forgejo via the admin API. This enables users to log into the web UI with a stable, re-derivable password.
 
 **Password policy:**
 - Requires an Ed25519 key (RSA and ECDSA are not deterministically signable)
 - Tied to the instance IP — password changes with each weekly rotation (new instance = new IP)
-- After a rotation, re-run `sign-user-key.sh --web-password` against the new instance to push the updated password
+- After a rotation, re-run `sign-user-key.sh --batch` against the new instance to push updated passwords
 - Users can re-derive their password at any time without contacting the admin (see below)
 
-**In single-user mode**, the private key is auto-discovered by stripping `.pub` from the pubkey path:
+**In single-user mode**, pass `--web-password` explicitly; the private key is auto-discovered by stripping `.pub` from the pubkey path:
 ```bash
 # alice_id_ed25519 and alice_id_ed25519.pub are in the same directory
 ./sign-user-key.sh alice alice_id_ed25519.pub --web-password
@@ -90,7 +92,7 @@ When `--web-password` is passed, the script derives a deterministic 32-character
 ./sign-user-key.sh alice alice_id_ed25519.pub --web-password --private-key /path/to/private_key
 ```
 
-**In batch mode**, passwords are derived for:
+**In batch mode** (default behaviour, suppress with `--no-web-password`), passwords are derived for:
 - Auto-generated key users (the private key is generated locally, always available)
 - File-path users where an adjacent private key exists (same path without `.pub`)
 - Users with inline public keys are skipped with a warning (no private key available)
