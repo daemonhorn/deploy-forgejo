@@ -1072,12 +1072,9 @@ until ssh-keyscan -p 22 -T 5 "$CONNECT_IP" >> known_hosts.deploy 2>/dev/null; do
     [ "$ATTEMPTS" -lt 30 ] || error "Timed out waiting for SSH on $CONNECT_IP"
     sleep 10
 done
-# ssh-keyscan writes bare IPv6 addresses (2001:db8::1) but `ssh user@[addr]`
-# looks up the bracketed form ([2001:db8::1]) in known_hosts.  Rewrite.
-if [[ "$CONNECT_IP" == *:* ]]; then
-    sed -i "s|^${CONNECT_IP} |[${CONNECT_IP}] |g" known_hosts.deploy
-fi
 info "SSH port is up."
+info "known_hosts.deploy content:"
+cat known_hosts.deploy >&2
 
 SSH_OPTS="-i $SSH_KEY -o UserKnownHostsFile=./known_hosts.deploy -o StrictHostKeyChecking=yes"
 _SSH_HOST="$(_ssh_host "$CONNECT_IP")"
@@ -1086,6 +1083,10 @@ _SSH_HOST="$(_ssh_host "$CONNECT_IP")"
 # Retry the actual login until it succeeds (up to 3 extra minutes).
 # On re-runs after hardening, root login is disabled — fall back to deploy user.
 info "Verifying SSH login as $SSH_USER (will retry as 'deploy' if root is disabled)..."
+_ssh_err="$(mktemp)"
+ssh $SSH_OPTS -v -o ConnectTimeout=10 -o BatchMode=yes "${SSH_USER}@${_SSH_HOST}" true 2>"$_ssh_err" \
+    || warn "First SSH attempt failed — verbose output:$(echo; tail -40 "$_ssh_err")"
+rm -f "$_ssh_err"
 ATTEMPTS=0
 until ssh $SSH_OPTS -o ConnectTimeout=10 -o BatchMode=yes "${SSH_USER}@${_SSH_HOST}" true 2>/dev/null; do
     ATTEMPTS=$((ATTEMPTS + 1))
