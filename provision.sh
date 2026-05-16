@@ -1072,6 +1072,11 @@ until ssh-keyscan -p 22 -T 5 "$CONNECT_IP" >> known_hosts.deploy 2>/dev/null; do
     [ "$ATTEMPTS" -lt 30 ] || error "Timed out waiting for SSH on $CONNECT_IP"
     sleep 10
 done
+# ssh-keyscan writes bare IPv6 addresses (2001:db8::1) but `ssh user@[addr]`
+# looks up the bracketed form ([2001:db8::1]) in known_hosts.  Rewrite.
+if [[ "$CONNECT_IP" == *:* ]]; then
+    sed -i "s|^${CONNECT_IP} |[${CONNECT_IP}] |g" known_hosts.deploy
+fi
 info "SSH port is up."
 
 SSH_OPTS="-i $SSH_KEY -o UserKnownHostsFile=./known_hosts.deploy -o StrictHostKeyChecking=yes"
