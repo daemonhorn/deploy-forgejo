@@ -50,6 +50,25 @@
 #   Org visibility is propagated from source.
 #   Source and destination must differ (safety guard).
 #
+# TOKEN LOOKUP
+#   Tokens are auto-generated via SSH when Vault is running locally.  To supply
+#   one manually (cross-machine or when Vault is unavailable):
+#
+#   Get the admin username from Vault:
+#     vault kv get -field=forgejo_admin_user secret/forgejo/deploy
+#
+#   Generate a token via SSH (replace <ip> and <admin-user> accordingly):
+#     ssh deploy@<ip> \
+#       "docker exec -u git forgejo /usr/local/bin/forgejo admin user \
+#        generate-access-token --username <admin-user> --token-name mirror --raw"
+#
+#   Or retrieve the admin password from Vault, then create a token in the web UI
+#   (User Settings → Applications → Generate Token):
+#     vault kv get -field=admin_password secret/forgejo/instances/vultr-default
+#
+#   Replace 'vultr-default' with '<provider>-<workspace>' for non-default instances.
+#   To list all known instances: cat .provision-log.json | python3 -m json.tool
+#
 # REQUIREMENTS
 #   git (>= 2.17), curl, python3, ssh, ssh-keyscan, terraform
 set -euo pipefail
