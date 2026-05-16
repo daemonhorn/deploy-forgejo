@@ -58,13 +58,14 @@ Idempotent. Each run:
 
 1. Starts and unseals Vault if needed
 2. Reads all secrets from Vault
-3. Prompts for cloud provider, then shows numbered menus for region and instance size (with approximate pricing); defaults to the previous run's values
-4. Writes `terraform.tfvars` for the selected provider
-5. Runs `terraform apply` (creates or reconciles the instance, firewall, SSH key)
-6. Waits for SSH to become available
-7. Renders config templates (`app.ini`, `.env`, `nginx.conf`) with secrets via `envsubst`
-8. SCPs all files to the VPS
-9. Runs `deploy.sh` on the VPS via SSH
+3. Generates or rotates the admin password for this provider+workspace (rotated if absent or older than 7 days; stored at `secret/forgejo/instances/<provider>-<workspace>`)
+4. Prompts for cloud provider, then shows numbered menus for region and instance size (with approximate pricing); defaults to the previous run's values
+5. Writes `terraform.tfvars` for the selected provider
+6. Runs `terraform apply` (creates or reconciles the instance, firewall, SSH key)
+7. Waits for SSH to become available
+8. Renders config templates (`app.ini`, `.env`, `nginx.conf`) with secrets via `envsubst`
+9. SCPs all files to the VPS
+10. Runs `deploy.sh` on the VPS via SSH
 
 `deploy.sh` (runs on VPS as root):
 - Installs Docker, creates the `git` system user
@@ -72,7 +73,7 @@ Idempotent. Each run:
 - Starts nginx in HTTP-only mode, issues the Let's Encrypt certificate, switches to TLS
 - Starts all Docker Compose services (Forgejo, PostgreSQL, nginx, certbot)
 - Configures a dedicated sshd on port 2222 for Git-over-SSH
-- Creates the Forgejo admin user and prints the one-time password
+- Creates the Forgejo admin user and sets the password from Vault
 
 **Provider selection** — pass `--provider` or be prompted (defaults to last used):
 

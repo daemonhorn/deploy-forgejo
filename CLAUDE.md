@@ -84,10 +84,12 @@ ca_public.pem  ←  local only (gitignored)
 ca.pub         ←  committed; deployed to VPS as TrustedUserCAKeys
 
 Vault (local, file backend in .vault-data/)
-  secret/forgejo/config   → db_password, db_user, db_name, ssh_ca_pubkey
-  secret/forgejo/cloud    → vultr_api_key
-  secret/forgejo/deploy   → certbot_email, admin_ssh_public_key, ...
-     ↓ provision.sh reads at deploy time; DOMAIN derived from Terraform IP output
+  secret/forgejo/config                        → db_password, db_user, db_name, ssh_ca_pubkey
+  secret/forgejo/cloud                         → vultr_api_key
+  secret/forgejo/deploy                        → certbot_email, admin_ssh_public_key, forgejo_admin_user, ...
+  secret/forgejo/instances/<provider>-<ws>     → admin_password, admin_password_ts, provider, workspace
+     ↓ provision.sh reads at deploy time; rotates admin_password if missing or > 7 days old
+     ↓ DOMAIN derived from Terraform IP output; secret deleted on --destroy
 VPS: /opt/forgejo/{.env, app.ini, ca.pub}
 ```
 
@@ -151,6 +153,7 @@ Before running `setup.sh`:
 - `ca_public.pem`: gitignored (regenerate from Yubikey anytime: `ykman piv keys export 9d ca_public.pem`)
 - `ca.pub`: **committed** — it's the CA public key, deployed to VPS
 - Terraform state (`terraform/<provider>/*.tfstate`): gitignored; no secrets (DB password is Vault-owned)
+- Admin password: stored per-instance at `secret/forgejo/instances/<provider>-<workspace>`; rotated on each `provision.sh` run if absent or older than 7 days; deleted from Vault on `--destroy`
 - VPS: `/opt/forgejo/.env` and `app.ini` chmod 600; contain DB password at rest
 
 ## Adding a New Cloud Provider
