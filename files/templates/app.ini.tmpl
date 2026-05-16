@@ -45,8 +45,10 @@ PASSWD  = ${DB_PASSWORD}
 
 ; ── Service ───────────────────────────────────────────────────────────────────
 [service]
-; Password auth disabled — users must authenticate via SSH certificate.
-ENABLE_BASIC_AUTHENTICATION = false
+; Password auth enabled — users log into the web UI with the password derived from their
+; Ed25519 key by sign-user-key.sh --web-password. SSH certificate auth is still required
+; for all Git operations over SSH.
+ENABLE_BASIC_AUTHENTICATION = true
 ; Self-registration disabled — admin must create accounts via sign-user-key.sh.
 DISABLE_REGISTRATION        = true
 ; Require sign-in to view any page (useful for fully private instances).
