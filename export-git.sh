@@ -266,6 +266,16 @@ def repo_record(repo):
     }
     return rec
 
+def wiki_has_pages(owner, name):
+    """Return True only if the wiki git repo has at least one page.
+    has_wiki=True means the wiki feature is enabled, not that any pages exist.
+    Cloning an uninitialised wiki repo fails with HTTP 404."""
+    try:
+        pages = api_get(f"/api/v1/repos/{owner}/{name}/wiki/pages?limit=1")
+        return bool(pages)
+    except Exception:
+        return False
+
 all_repos = {}   # full_name -> record (dedup across user+org enumeration)
 
 # Users
@@ -280,7 +290,7 @@ try:
                 all_repos[rec["full_name"]] = rec
 
                 # Wiki: separate bare repo, not returned by repos/search
-                if include_wikis and repo.get("has_wiki", False):
+                if include_wikis and repo.get("has_wiki", False) and wiki_has_pages(rec["owner"], rec["name"]):
                     wiki_rec = {
                         **rec,
                         "full_name": f"{rec['full_name']}.wiki",
@@ -299,7 +309,7 @@ except Exception as e:
             continue
         rec = repo_record(repo)
         all_repos[rec["full_name"]] = rec
-        if include_wikis and repo.get("has_wiki", False):
+        if include_wikis and repo.get("has_wiki", False) and wiki_has_pages(rec["owner"], rec["name"]):
             wiki_rec = {
                 **rec,
                 "full_name": f"{rec['full_name']}.wiki",
@@ -322,7 +332,7 @@ try:
                 rec = repo_record(repo)
                 all_repos[rec["full_name"]] = rec
 
-                if include_wikis and repo.get("has_wiki", False):
+                if include_wikis and repo.get("has_wiki", False) and wiki_has_pages(rec["owner"], rec["name"]):
                     wiki_rec = {
                         **rec,
                         "full_name": f"{rec['full_name']}.wiki",
