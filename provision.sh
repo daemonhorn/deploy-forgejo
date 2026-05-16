@@ -478,15 +478,24 @@ ADMIN_SSH_PUBLIC_KEY="$(vget admin_ssh_public_key secret/forgejo/deploy)"
 FORGEJO_ADMIN_USER="$(vget forgejo_admin_user secret/forgejo/deploy)"
 FORGEJO_ADMIN_EMAIL="$(vget forgejo_admin_email secret/forgejo/deploy)"
 
-# Generate a secure admin password once and persist it; reused on re-runs so
-# Vault is always the authoritative source for the current admin credential.
-FORGEJO_ADMIN_PASSWORD="$(vget admin_password secret/forgejo/deploy 2>/dev/null || true)"
-if [ -z "$FORGEJO_ADMIN_PASSWORD" ]; then
-    info "Generating Forgejo admin password (20-24 chars)..."
-    # 18 random bytes → 24 base64 chars; strip +/= → 20-24 alphanumeric chars
+# Per-instance admin password keyed by provider+workspace so multiple active
+# instances have independent credentials.  Rotated on any run where the stored
+# password is missing or older than 7 days; Vault is always authoritative.
+_INST_SECRET="secret/forgejo/instances/${PROVIDER}-${WORKSPACE}"
+FORGEJO_ADMIN_PASSWORD="$(vget admin_password "$_INST_SECRET" 2>/dev/null || true)"
+_pw_ts="$(vget admin_password_ts "$_INST_SECRET" 2>/dev/null || true)"
+_now="$(date +%s)"
+if [[ -z "$FORGEJO_ADMIN_PASSWORD" ]] || \
+   [[ -z "$_pw_ts" ]] || \
+   (( _now - _pw_ts >= 604800 )); then
+    info "Rotating Forgejo admin password for ${PROVIDER}/${WORKSPACE}..."
     FORGEJO_ADMIN_PASSWORD="$(openssl rand -base64 18 | tr -d '+/=')"
-    vault kv patch secret/forgejo/deploy admin_password="$FORGEJO_ADMIN_PASSWORD"
-    info "Admin password saved to Vault: secret/forgejo/deploy (field: admin_password)"
+    vault kv put "$_INST_SECRET" \
+        admin_password="$FORGEJO_ADMIN_PASSWORD" \
+        admin_password_ts="$_now" \
+        provider="$PROVIDER" \
+        workspace="$WORKSPACE"
+    info "Admin password stored: $_INST_SECRET (field: admin_password)"
 fi
 
 # ── Provider credentials ──────────────────────────────────────────────────────
@@ -632,6 +641,10 @@ _destroy_workspace() {
             || warn "Could not delete Terraform workspace '${ws}' — manual cleanup: terraform -chdir=${TF_DIR} workspace delete ${ws}"
         rm -f "$wsfile"
     fi
+
+    # Remove the per-instance Vault secret so stale credentials don't linger.
+    vault kv metadata delete "secret/forgejo/instances/${PROVIDER}-${ws}" 2>/dev/null \
+        || warn "Could not remove Vault secret for '${ws}' — manual cleanup: vault kv metadata delete secret/forgejo/instances/${PROVIDER}-${ws}"
 
     cd "$SCRIPT_DIR"
     info "Destroy complete for workspace '${ws}'."
@@ -1167,7 +1180,7 @@ echo "  Admin SSH : ssh deploy@${_SSH_HOST}   (root login disabled after hardeni
 echo
 echo "  Forgejo admin credentials:"
 echo "    Username : ${FORGEJO_ADMIN_USER}"
-echo "    Password : VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=\$(cat ${SCRIPT_DIR}/.vault.token) vault kv get -field=admin_password secret/forgejo/deploy"
+echo "    Password : VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=\$(cat ${SCRIPT_DIR}/.vault.token) vault kv get -field=admin_password ${_INST_SECRET}"
 echo
 echo "  To add a user:"
 echo "    ./sign-user-key.sh <username> /path/to/user_key.pub"
