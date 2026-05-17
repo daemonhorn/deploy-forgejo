@@ -16,7 +16,7 @@ error() { echo -e "${RED}[setup]${NC} $*" >&2; exit 1; }
 
 # ── 1. Prerequisite check ─────────────────────────────────────────────────────
 info "Checking prerequisites..."
-validate_external_utils ykman vault ssh-keygen openssl || exit 1
+validate_external_utils ykman vault ssh-keygen openssl
 
 ykman info &>/dev/null || error "No Yubikey detected. Connect your Yubikey and try again."
 

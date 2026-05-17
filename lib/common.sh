@@ -87,8 +87,8 @@ validate_external_utils() {
 
     [[ ${#_apt[@]} -eq 0 && ${#_manual[@]} -eq 0 ]] && return 0
 
-    printf '%b\n' "${RED}[error]${NC} Missing required tools — install and retry:" >&2
-    [[ ${#_apt[@]} -gt 0 ]] && printf '  sudo apt install %s\n' "${_apt[*]}" >&2
-    printf '%s\n' "${_manual[@]}" >&2
-    return 1
+    printf '%b\n' "${RED}[error]${NC} Missing required tools:" >&2
+    [[ ${#_manual[@]} -gt 0 ]] && printf '%s\n' "${_manual[@]}" >&2
+    [[ ${#_apt[@]} -gt 0 ]] && printf '%b\n' "${RED}  sudo apt install ${_apt[*]}${NC}" >&2
+    exit 1
 }

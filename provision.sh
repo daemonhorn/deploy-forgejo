@@ -510,7 +510,7 @@ fi
 info "Provider: $PROVIDER"
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
-validate_external_utils vault terraform ssh scp ssh-keyscan envsubst curl python3 || exit 1
+validate_external_utils vault terraform ssh scp ssh-keyscan envsubst curl python3
 
 [ -f .vault.token ] || error ".vault.token not found. Run ./setup.sh first."
 [ -f .vault-keys ]  || error ".vault-keys not found. Run ./setup.sh first."

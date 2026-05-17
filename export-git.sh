@@ -123,7 +123,7 @@ done
 [[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
-validate_external_utils git curl python3 zstd || exit 1
+validate_external_utils git curl python3 zstd
 
 # ── Output path ───────────────────────────────────────────────────────────────
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
