@@ -26,7 +26,7 @@ tfvars_get() {
     local file="$1" var="$2"
     [[ -f "$file" ]] || return 0
     grep -E "^\s*${var}\s*=" "$file" 2>/dev/null \
-        | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/' | tr -d '[:space:]'
+        | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/' | tr -d '[:space:]' || true
 }
 
 # Read an HCL list field from tfvars and return comma-separated values.
