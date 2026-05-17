@@ -76,9 +76,15 @@ except Exception as e:
         error "Could not auto-detect admin network address. Pass --admin-cidrs <cidr,...> explicitly."
     fi
 
-    # Warn if ip_stack=ipv6 but no IPv6 CIDR was detected — admin would be locked out.
+    # Fail hard if ip_stack=ipv6 but no IPv6 CIDR was detected — admin would be locked out.
     if [[ "$IP_STACK" == "ipv6" ]] && [[ "$_cidrs" != *:* ]]; then
         error "ip_stack=ipv6 but no IPv6 admin address detected — admin would be locked out. Pass --admin-cidrs with an IPv6 CIDR."
+    fi
+
+    # In dual mode with only IPv4 detected: IPv6 admin ports (22, 2222) will be
+    # blocked for all IPv6 sources (no allow rule = provider default-deny).
+    if [[ "$IP_STACK" == "dual" ]] && [[ "$_cidrs" != *:* ]]; then
+        warn "No IPv6 admin CIDR detected — admin ports (22, 2222) will be blocked for all IPv6 in dual mode. Pass --admin-cidrs with an IPv6 CIDR to allow IPv6 admin access."
     fi
 
     printf '%s' "$_cidrs"

@@ -35,9 +35,9 @@ variable "admin_only_ports" {
 }
 
 variable "allowed_cidrs" {
-  description = "CIDRs allowed inbound on admin_only_ports. Written by provision.sh from --admin-cidrs or auto-detected admin IP."
+  description = "CIDRs allowed inbound on admin_only_ports. Empty list blocks all admin access (fail-closed). Written by provision.sh."
   type        = list(string)
-  default     = ["0.0.0.0/0", "::/0"]
+  default     = []
 }
 
 variable "ip_stack" {
