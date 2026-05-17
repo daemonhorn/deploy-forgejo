@@ -3,6 +3,7 @@ vultr_api_key
 aws_access_key
 aws_secret_access_key
 azure_credentials
+users
 
 # Operational data (instance-specific; not code)
 .provision-log.json
