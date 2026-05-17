@@ -27,9 +27,21 @@ variable "admin_ssh_public_key" {
 }
 
 variable "firewall_ports" {
-  description = "TCP ports to open inbound. 2222 = Forgejo Git SSH on host sshd."
+  description = "All TCP ports to open inbound. Public ports get 0.0.0.0/0; admin_only_ports get allowed_cidrs."
   type        = list(number)
   default     = [22, 80, 443, 2222]
+}
+
+variable "admin_only_ports" {
+  description = "Subset of firewall_ports restricted to allowed_cidrs (SSH ports; 80/443 stay world-open for certbot)."
+  type        = list(number)
+  default     = [22, 2222]
+}
+
+variable "allowed_cidrs" {
+  description = "CIDRs allowed inbound on admin_only_ports. Empty list blocks all admin access (fail-closed). Written by provision.sh."
+  type        = list(string)
+  default     = []
 }
 
 variable "ip_stack" {

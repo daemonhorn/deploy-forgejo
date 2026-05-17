@@ -92,6 +92,13 @@ resource "aws_route_table_association" "main" {
 locals {
   vpc_id    = var.ip_stack == "ipv4" ? data.aws_vpc.default[0].id : aws_vpc.main[0].id
   subnet_id = var.ip_stack != "ipv4" ? aws_subnet.main[0].id : null
+
+  # Split allowed_cidrs into IPv4 and IPv6.
+  allowed_v4_cidrs = [for c in var.allowed_cidrs : c if !strcontains(c, ":")]
+  allowed_v6_cidrs = [for c in var.allowed_cidrs : c if strcontains(c, ":")]
+
+  # Ports open to the world (not in admin_only_ports).
+  public_ports = [for p in var.firewall_ports : p if !contains(var.admin_only_ports, p)]
 }
 
 # ── Key pair ──────────────────────────────────────────────────────────────────
@@ -106,9 +113,9 @@ resource "aws_security_group" "main" {
   description = "Forgejo server inbound rules"
   vpc_id      = local.vpc_id
 
-  # IPv4 ingress — omitted in ipv6-only mode.
+  # World-open IPv4 ingress for public ports — omitted in ipv6-only mode.
   dynamic "ingress" {
-    for_each = var.ip_stack != "ipv6" ? { for p in var.firewall_ports : tostring(p) => p } : {}
+    for_each = var.ip_stack != "ipv6" ? { for p in local.public_ports : tostring(p) => p } : {}
     iterator = rule
     content {
       from_port   = rule.value
@@ -118,15 +125,39 @@ resource "aws_security_group" "main" {
     }
   }
 
-  # IPv6 ingress — added in dual and ipv6-only modes.
+  # World-open IPv6 ingress for public ports — added in dual and ipv6-only modes.
   dynamic "ingress" {
-    for_each = var.ip_stack != "ipv4" ? { for p in var.firewall_ports : tostring(p) => p } : {}
+    for_each = var.ip_stack != "ipv4" ? { for p in local.public_ports : tostring(p) => p } : {}
     iterator = rule
     content {
       from_port        = rule.value
       to_port          = rule.value
       protocol         = "tcp"
       ipv6_cidr_blocks = ["::/0"]
+    }
+  }
+
+  # Admin-only IPv4 ingress — one rule per admin port, CIDR list restricted to admin network.
+  dynamic "ingress" {
+    for_each = var.ip_stack != "ipv6" && length(local.allowed_v4_cidrs) > 0 ? { for p in var.admin_only_ports : tostring(p) => p } : {}
+    iterator = rule
+    content {
+      from_port   = rule.value
+      to_port     = rule.value
+      protocol    = "tcp"
+      cidr_blocks = local.allowed_v4_cidrs
+    }
+  }
+
+  # Admin-only IPv6 ingress — one rule per admin port.
+  dynamic "ingress" {
+    for_each = var.ip_stack != "ipv4" && length(local.allowed_v6_cidrs) > 0 ? { for p in var.admin_only_ports : tostring(p) => p } : {}
+    iterator = rule
+    content {
+      from_port        = rule.value
+      to_port          = rule.value
+      protocol         = "tcp"
+      ipv6_cidr_blocks = local.allowed_v6_cidrs
     }
   }
 

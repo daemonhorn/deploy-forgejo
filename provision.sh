@@ -26,7 +26,68 @@ tfvars_get() {
     local file="$1" var="$2"
     [[ -f "$file" ]] || return 0
     grep -E "^\s*${var}\s*=" "$file" 2>/dev/null \
-        | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/' | tr -d '[:space:]'
+        | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/' | tr -d '[:space:]' || true
+}
+
+# Read an HCL list field from tfvars and return comma-separated values.
+# Handles:  allowed_cidrs = ["a/b", "c/d"]
+tfvars_get_list() {
+    local file="$1" var="$2"
+    [[ -f "$file" ]] || return 0
+    python3 - "$file" "$var" <<'PY'
+import re, sys
+content = open(sys.argv[1]).read()
+m = re.search(r'^\s*' + re.escape(sys.argv[2]) + r'\s*=\s*\[([^\]]*)\]', content, re.MULTILINE)
+if m:
+    items = re.findall(r'"([^"]+)"', m.group(1))
+    print(','.join(items))
+PY
+}
+
+# Auto-detect admin network CIDRs from icanhazip.com.
+# IPv4: single-host /32.  IPv6: /64 subnet (whole /64 the admin is on).
+# Fails with a clear error if detection fails and --admin-cidrs was not given.
+detect_admin_cidrs() {
+    local _v4 _v6 _v6_net _cidrs=""
+
+    _v4="$(curl -s --max-time 5 https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]')" || true
+    _v6="$(curl -s --max-time 5 https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]')" || true
+
+    if [[ -n "$_v4" ]] && [[ "$_v4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        _cidrs="${_v4}/32"
+    fi
+
+    if [[ -n "$_v6" ]] && [[ "$_v6" == *:* ]]; then
+        _v6_net="$(python3 -c "
+import ipaddress, sys
+try:
+    net = ipaddress.ip_network('${_v6}/64', strict=False)
+    print(str(net))
+except Exception as e:
+    sys.exit(1)
+" 2>/dev/null)" || true
+        if [[ -n "$_v6_net" ]]; then
+            [[ -n "$_cidrs" ]] && _cidrs="${_cidrs},"
+            _cidrs="${_cidrs}${_v6_net}"
+        fi
+    fi
+
+    if [[ -z "$_cidrs" ]]; then
+        error "Could not auto-detect admin network address. Pass --admin-cidrs <cidr,...> explicitly."
+    fi
+
+    # Fail hard if ip_stack=ipv6 but no IPv6 CIDR was detected — admin would be locked out.
+    if [[ "$IP_STACK" == "ipv6" ]] && [[ "$_cidrs" != *:* ]]; then
+        error "ip_stack=ipv6 but no IPv6 admin address detected — admin would be locked out. Pass --admin-cidrs with an IPv6 CIDR."
+    fi
+
+    # In dual mode with only IPv4 detected: IPv6 admin ports (22, 2222) will be
+    # blocked for all IPv6 sources (no allow rule = provider default-deny).
+    if [[ "$IP_STACK" == "dual" ]] && [[ "$_cidrs" != *:* ]]; then
+        warn "No IPv6 admin CIDR detected — admin ports (22, 2222) will be blocked for all IPv6 in dual mode. Pass --admin-cidrs with an IPv6 CIDR to allow IPv6 admin access."
+    fi
+
+    printf '%s' "$_cidrs"
 }
 
 # Interactive numbered menu. Items are "code:description" strings.
@@ -363,6 +424,8 @@ DESTROY_ALL=false
 LOG_FILE="${SCRIPT_DIR}/.provision-log.json"
 IP_STACK="ipv4"
 _IP_STACK_EXPLICIT=false
+ADMIN_CIDRS=""
+_ADMIN_CIDRS_EXPLICIT=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -405,8 +468,13 @@ while [[ $# -gt 0 ]]; do
             [[ "$IP_STACK" =~ ^(ipv4|ipv6|dual)$ ]] || error "--ip-stack must be 'ipv4', 'ipv6', or 'dual'"
             _IP_STACK_EXPLICIT=true
             shift 2 ;;
+        --admin-cidrs)
+            [[ $# -ge 2 ]] || error "--admin-cidrs requires a value (comma-separated CIDRs)"
+            ADMIN_CIDRS="$2"
+            _ADMIN_CIDRS_EXPLICIT=true
+            shift 2 ;;
         *)
-            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--ip-stack ipv4|ipv6|dual] [--debug] [--debug-certbot]" ;;
+            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--ip-stack ipv4|ipv6|dual] [--admin-cidrs <cidr,...>] [--debug] [--debug-certbot]" ;;
     esac
 done
 
@@ -775,6 +843,20 @@ if ! $_IP_STACK_EXPLICIT; then
     _saved_ip_stack="$(tfvars_get "$_tfvars_for_read" ip_stack)"
     [[ -n "$_saved_ip_stack" ]] && IP_STACK="$_saved_ip_stack"
 fi
+# Restore allowed_cidrs from a previous run if --admin-cidrs was not passed.
+if ! $_ADMIN_CIDRS_EXPLICIT; then
+    _saved_cidrs="$(tfvars_get_list "$_tfvars_for_read" allowed_cidrs)"
+    if [[ -n "$_saved_cidrs" ]]; then
+        ADMIN_CIDRS="$_saved_cidrs"
+        info "Admin CIDRs restored from tfvars: $ADMIN_CIDRS"
+    else
+        info "Auto-detecting admin network address..."
+        ADMIN_CIDRS="$(detect_admin_cidrs)"
+        info "Admin CIDRs detected: $ADMIN_CIDRS"
+    fi
+else
+    info "Admin CIDRs (explicit): $ADMIN_CIDRS"
+fi
 
 mkdir -p "$CACHE_DIR"
 
@@ -952,6 +1034,13 @@ esac
 
 info "Selected: region=${REGION}  plan=${PLAN}"
 
+# Build HCL list string for allowed_cidrs from comma-separated ADMIN_CIDRS.
+_allowed_cidrs_hcl="$(python3 -c "
+import sys
+cidrs = [c.strip() for c in '${ADMIN_CIDRS}'.split(',') if c.strip()]
+print('[' + ', '.join('\"' + c + '\"' for c in cidrs) + ']')
+")"
+
 # Write provider-specific tfvars (workspace-specific file for non-default workspaces).
 case "$PROVIDER" in
     vultr)
@@ -960,14 +1049,16 @@ region        = "${REGION}"
 plan          = "${PLAN}"
 hostname      = "${HOSTNAME}"
 ip_stack      = "${IP_STACK}"
+allowed_cidrs = ${_allowed_cidrs_hcl}
 EOF
         ;;
     aws|azure)
         cat > "$_ws_tfvars" <<EOF
-region   = "${REGION}"
-plan     = "${PLAN}"
-hostname = "${HOSTNAME}"
-ip_stack = "${IP_STACK}"
+region        = "${REGION}"
+plan          = "${PLAN}"
+hostname      = "${HOSTNAME}"
+ip_stack      = "${IP_STACK}"
+allowed_cidrs = ${_allowed_cidrs_hcl}
 EOF
         ;;
 esac
@@ -1189,6 +1280,7 @@ _run ssh $SSH_OPTS "${SSH_USER}@${_SSH_HOST}" \
     "${SUDO_PREFIX} DOMAIN='${DOMAIN}' \
      IP_STACK='${IP_STACK}' \
      IPV6='${IPV6:-}' \
+     ADMIN_CIDRS='${ADMIN_CIDRS}' \
      CERTBOT_EMAIL='${CERTBOT_EMAIL}' \
      CERTBOT_STAGING='${CERTBOT_STAGING}' \
      DEBUG='${DEBUG}' \

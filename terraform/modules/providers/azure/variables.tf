@@ -21,8 +21,20 @@ variable "hostname" {
 }
 
 variable "firewall_ports" {
-  description = "TCP ports to open inbound from 0.0.0.0/0."
+  description = "All TCP ports to open inbound. Public ports get 0.0.0.0/0; admin_only_ports get allowed_cidrs."
   type        = list(number)
+}
+
+variable "admin_only_ports" {
+  description = "Subset of firewall_ports restricted to allowed_cidrs (default: SSH ports only)."
+  type        = list(number)
+  default     = [22, 2222]
+}
+
+variable "allowed_cidrs" {
+  description = "CIDRs permitted inbound on admin_only_ports. Empty list blocks all admin access (fail-closed default). provision.sh populates this from --admin-cidrs or auto-detected admin IP."
+  type        = list(string)
+  default     = []
 }
 
 variable "ip_stack" {

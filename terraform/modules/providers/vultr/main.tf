@@ -12,6 +12,28 @@ terraform {
 locals {
   # Debian 12 x64 OS ID on Vultr (verify with API if this changes)
   debian12_os_id = 2136
+
+  # Split allowed_cidrs into IPv4 (no colon) and IPv6 (contains colon).
+  allowed_v4_cidrs = [for c in var.allowed_cidrs : c if !strcontains(c, ":")]
+  allowed_v6_cidrs = [for c in var.allowed_cidrs : c if strcontains(c, ":")]
+
+  # Ports open to the world (not in admin_only_ports).
+  public_ports = [for p in var.firewall_ports : p if !contains(var.admin_only_ports, p)]
+
+  # Cartesian product maps for admin-restricted rules: key = "port-cidr".
+  admin_v4_rules = var.ip_stack != "ipv6" ? {
+    for pair in setproduct(
+      [for p in var.admin_only_ports : tostring(p)],
+      local.allowed_v4_cidrs
+    ) : "${pair[0]}-${pair[1]}" => { port = pair[0], cidr = pair[1] }
+  } : {}
+
+  admin_v6_rules = var.ip_stack != "ipv4" ? {
+    for pair in setproduct(
+      [for p in var.admin_only_ports : tostring(p)],
+      local.allowed_v6_cidrs
+    ) : "${pair[0]}-${pair[1]}" => { port = pair[0], cidr = pair[1] }
+  } : {}
 }
 
 resource "vultr_ssh_key" "admin" {
@@ -23,9 +45,9 @@ resource "vultr_firewall_group" "main" {
   description = "${var.hostname} firewall"
 }
 
-# IPv4 ingress rules — omitted in ipv6-only mode so all IPv4 traffic is dropped.
-resource "vultr_firewall_rule" "inbound_v4" {
-  for_each = var.ip_stack != "ipv6" ? toset([for p in var.firewall_ports : tostring(p)]) : toset([])
+# World-open IPv4 ingress for public ports (80, 443) — omitted in ipv6-only mode.
+resource "vultr_firewall_rule" "public_v4" {
+  for_each = var.ip_stack != "ipv6" ? toset([for p in local.public_ports : tostring(p)]) : toset([])
 
   firewall_group_id = vultr_firewall_group.main.id
   protocol          = "tcp"
@@ -33,12 +55,12 @@ resource "vultr_firewall_rule" "inbound_v4" {
   subnet            = "0.0.0.0"
   subnet_size       = 0
   port              = each.value
-  notes             = "port ${each.value}"
+  notes             = "port ${each.value} public"
 }
 
-# IPv6 ingress rules — added in dual and ipv6-only modes.
-resource "vultr_firewall_rule" "inbound_v6" {
-  for_each = var.ip_stack != "ipv4" ? toset([for p in var.firewall_ports : tostring(p)]) : toset([])
+# World-open IPv6 ingress for public ports — added in dual and ipv6-only modes.
+resource "vultr_firewall_rule" "public_v6" {
+  for_each = var.ip_stack != "ipv4" ? toset([for p in local.public_ports : tostring(p)]) : toset([])
 
   firewall_group_id = vultr_firewall_group.main.id
   protocol          = "tcp"
@@ -46,7 +68,33 @@ resource "vultr_firewall_rule" "inbound_v6" {
   subnet            = "::"
   subnet_size       = 0
   port              = each.value
-  notes             = "port ${each.value} IPv6"
+  notes             = "port ${each.value} public IPv6"
+}
+
+# Admin-only IPv4 ingress: one rule per (port, CIDR) pair.
+resource "vultr_firewall_rule" "admin_v4" {
+  for_each = local.admin_v4_rules
+
+  firewall_group_id = vultr_firewall_group.main.id
+  protocol          = "tcp"
+  ip_type           = "v4"
+  subnet            = split("/", each.value.cidr)[0]
+  subnet_size       = tonumber(split("/", each.value.cidr)[1])
+  port              = each.value.port
+  notes             = "port ${each.value.port} admin ${each.value.cidr}"
+}
+
+# Admin-only IPv6 ingress: one rule per (port, CIDR) pair.
+resource "vultr_firewall_rule" "admin_v6" {
+  for_each = local.admin_v6_rules
+
+  firewall_group_id = vultr_firewall_group.main.id
+  protocol          = "tcp"
+  ip_type           = "v6"
+  subnet            = split("/", each.value.cidr)[0]
+  subnet_size       = tonumber(split("/", each.value.cidr)[1])
+  port              = each.value.port
+  notes             = "port ${each.value.port} admin ${each.value.cidr} IPv6"
 }
 
 resource "vultr_instance" "main" {

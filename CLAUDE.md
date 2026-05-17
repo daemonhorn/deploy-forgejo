@@ -21,6 +21,8 @@ Automates deployment of a [Forgejo](https://forgejo.org/) container instance on 
     --region ewr --plan vc2-1c-1gb                        # unattended/cron (no interactive prompts)
 ./provision.sh --ip-stack dual                            # dual-stack IPv4 + IPv6 (IPv4 used for TLS/SSH)
 ./provision.sh --ip-stack ipv6                            # IPv6-only firewall; provisioning and TLS use IPv6
+./provision.sh --admin-cidrs 203.0.113.5/32               # restrict SSH (22, 2222) to specific CIDR; auto-detected if omitted
+./provision.sh --admin-cidrs 203.0.113.0/24,2001:db8::/48 # multiple CIDRs comma-separated
 ```
 
 **Destroy an instance:**
@@ -49,6 +51,10 @@ Automates deployment of a [Forgejo](https://forgejo.org/) container instance on 
     --src-url https://SRC_IP --src-token TOKEN \
     --dest-url https://DEST_IP --dest-token TOKEN \
     --quiet                                              # unattended/cron
+
+./mirror-git.sh \
+    --dest-provider vultr --dest-region ewr --dest-plan vc2-1c-1gb \
+    --admin-cidrs 203.0.113.5/32                         # pass CIDRs through to provision.sh
 ```
 
 **Export / backup all repositories:**
@@ -104,10 +110,27 @@ VPS: /opt/forgejo/{.env, app.ini, ca.pub}
 | Forgejo Git SSH | Host sshd (`sshd-forgejo.service`) | 2222 |
 
 Forgejo's **built-in SSH server is disabled** (`START_SSH_SERVER = false`). A separate sshd instance on port 2222 handles Git-over-SSH with:
-- `TrustedUserCAKeys /etc/ssh/forgejo_ca.pub`
 - `AuthorizedKeysCommand /usr/local/bin/forgejo-keys.sh %u %t %k`
 
 `forgejo-keys.sh` handles both raw keys and certificates. For cert auth it calls `files/forgejo-cert-extract.py` to extract the base public key from the cert blob (binary SSH cert parsing) before querying Forgejo.
+
+### Firewall Model (two-layer)
+
+| Layer | Ports 22, 2222 | Ports 80, 443 |
+|---|---|---|
+| Cloud provider firewall | Admin CIDRs only (`allowed_cidrs` in Terraform) | World-open (ACME HTTP-01 needs it) |
+| VM iptables (`DOCKER-USER`) | Not applicable (not Docker-mapped) | Admin CIDRs normally; world-open during certbot renewal |
+
+**Admin CIDRs**: auto-detected on each provision from `ipv4.icanhazip.com` (as /32) and `ipv6.icanhazip.com` (as /64 subnet). Override with `--admin-cidrs <cidr,...>`. Persisted in `terraform.tfvars` so re-runs restore without re-detecting.
+
+**certbot renewal**: `certbot-renew.service` runs `forgejo-fw-open-http.sh` before the ACME challenge (allows all port 80 traffic) and `forgejo-fw-apply.sh` after renewal completes (restores admin-CIDR restriction). Port 443 stays admin-restricted during renewal — nginx serves the ACME response on port 80 only.
+
+**Boot persistence**: `forgejo-fw.service` (`After=docker.service`) re-applies the DOCKER-USER rules on every boot. Docker flushes iptables chains on daemon restart, so the service must run after Docker is up.
+
+**Key VPS files**:
+- `/etc/forgejo-admin-cidrs` — one CIDR per line; source of truth for the VM-level firewall
+- `/usr/local/bin/forgejo-fw-apply.sh` — applies DOCKER-USER rules for 80/443
+- `/usr/local/bin/forgejo-fw-open-http.sh` — temporarily opens 80 for certbot
 
 ### Auth Policy
 
