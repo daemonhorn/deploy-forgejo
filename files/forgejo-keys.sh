@@ -90,8 +90,25 @@ if $IS_CERT; then
 
         RESULT="$(_forgejo_query "$USERNAME" "$BASE_TYPE" "$BASE_DATA")"
         if [[ -n "$RESULT" ]]; then
+            # Return a cert-authority line rather than the raw Forgejo key line.
+            # With TrustedUserCAKeys absent, sshd passes the cert blob here via
+            # AuthorizedKeysCommand; a cert-authority response causes sshd to
+            # validate the CA signature AND apply the command= restriction in one
+            # step. Returning the user key line directly would bypass CA validation.
+            #
+            # Use the first non-comment key in forgejo_ca.pub (the ECDSA signing key).
+            CA_LINE="$(grep -Ev '^(#|[[:space:]]*$)' /etc/ssh/forgejo_ca.pub 2>/dev/null | head -1)"
+            if [[ -z "$CA_LINE" ]]; then
+                _audit "WARN cert-auth-no-ca-key user=$USERNAME"
+                exit 1
+            fi
+            # Forgejo output may start with a "# gitea public key" comment line;
+            # strip comments before extracting the options.
+            # Format from Forgejo: 'command="...",<opts> <key-type> <key-b64>'
+            KEY_LINE="$(printf '%s\n' "$RESULT" | grep -v '^[[:space:]]*#' | head -1)"
+            OPTS="${KEY_LINE%% ${BASE_TYPE} *}"
             _audit "ts=$(date -u +%FT%TZ) user=$USERNAME kt=$KEY_TYPE fp=$FP base_fp=$BASE_FP mode=cert result=ok"
-            printf '%s\n' "$RESULT"
+            printf 'cert-authority,%s %s\n' "$OPTS" "$CA_LINE"
             exit 0
         else
             # Key not found in Forgejo — do NOT exit 0 with empty stdout (sshd
