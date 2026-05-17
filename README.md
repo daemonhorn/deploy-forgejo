@@ -313,6 +313,61 @@ Port 2222 runs a dedicated sshd instance (`sshd-forgejo.service`) configured wit
 
 `forgejo-keys.sh` handles both raw keys and certificates. For cert auth it calls `forgejo-cert-extract.py` to parse the binary cert blob and extract the embedded base public key, then queries Forgejo's internal `keys` command to get the correct `serv` invocation.
 
+### Audit log
+
+Every auth attempt — success and failure — is logged to syslog with the tag `forgejo-auth`. View on the VPS:
+
+```bash
+journalctl -t forgejo-auth -f          # follow live
+journalctl -t forgejo-auth -n 50       # last 50 entries
+```
+
+Each entry includes: timestamp, username, key type (`kt=`), SHA256 fingerprint (`fp=`), and result. Cert auth also logs the extracted base key fingerprint (`base_fp=`).
+
+```
+ts=2026-05-17T03:00:00Z user=alice kt=ssh-ed25519-cert-v01@openssh.com fp=SHA256:... base_fp=SHA256:... mode=cert result=ok
+ts=2026-05-17T03:00:01Z user=bob   kt=ssh-ed25519-cert-v01@openssh.com fp=SHA256:... base_fp=SHA256:... mode=cert result=empty:key_not_registered
+```
+
+| Result value | Meaning |
+|---|---|
+| `result=ok` | Auth succeeded; `forgejo serv` command returned to sshd |
+| `result=empty:key_not_registered` | Cert is CA-signed and parseable, but the base key is not in Forgejo — run `sign-user-key.sh` |
+| `result=err:extract_failed` | Cert blob could not be parsed — re-issue cert with `sign-user-key.sh` |
+| `result=empty` (raw mode) | Key not found in Forgejo; cert may not have been presented |
+| `WARN docker-exec-failed` | Forgejo container not running — check `docker ps` |
+| `WARN cert-extract-stderr` | `forgejo-cert-extract.py` printed errors — enable `FORGEJO_KEYS_DEBUG=1` for details |
+
+If auth fails with **no audit entry at all**, sshd rejected the connection before calling `AuthorizedKeysCommand` — the cert is either unsigned (CA check failed), expired, or the principal does not match.
+
+### Verbose debug tracing
+
+Set `FORGEJO_KEYS_DEBUG=1` to enable per-field cert parsing traces and detailed auth flow logging. To test a specific cert manually on the VPS:
+
+```bash
+sudo -u nobody FORGEJO_KEYS_DEBUG=1 /usr/local/bin/forgejo-keys.sh git \
+    ssh-ed25519-cert-v01@openssh.com <base64-cert-blob>
+journalctl -t forgejo-auth -n 30
+```
+
+The debug output from `forgejo-cert-extract.py` includes: `blob_bytes`, `cert_type`, `base_type`, `nonce_len`, key field sizes, and the reconstructed `key_b64_len`.
+
+### sshd verbose logging
+
+`/etc/ssh/sshd_forgejo.conf` contains a commented `#LogLevel VERBOSE` directive. Enabling it shows sshd-level cert validation, `AuthorizedKeysCommand` invocations, and key-match decisions:
+
+```bash
+# On VPS — enable temporarily for troubleshooting
+sed -i 's/^#LogLevel VERBOSE/LogLevel VERBOSE/' /etc/ssh/sshd_forgejo.conf
+systemctl restart sshd-forgejo
+journalctl -u sshd-forgejo -f
+# ... reproduce the failure ...
+sed -i 's/^LogLevel VERBOSE/#LogLevel VERBOSE/' /etc/ssh/sshd_forgejo.conf
+systemctl restart sshd-forgejo
+```
+
+Do not leave `LogLevel VERBOSE` enabled permanently — it logs full key material for every connection.
+
 ## Repository layout
 
 ```
