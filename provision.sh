@@ -253,6 +253,9 @@ LABELS = {
     'me-south-1':     'Bahrain - Middle East',
 }
 try:
+    import shutil
+    if shutil.which('aws') is None:
+        raise RuntimeError("aws CLI not installed — run: sudo apt install awscli")
     out = subprocess.run(
         ['aws', 'ec2', 'describe-regions', '--output', 'json'],
         capture_output=True, text=True, timeout=15
@@ -295,6 +298,9 @@ STATIC = {
 }
 file, region = sys.argv[1], sys.argv[2]
 try:
+    import shutil
+    if shutil.which('aws') is None:
+        raise RuntimeError("aws CLI not installed — run: sudo apt install awscli")
     out = subprocess.run(
         ['aws', 'ec2', 'describe-instance-type-offerings',
          '--location-type', 'region',
@@ -504,9 +510,7 @@ fi
 info "Provider: $PROVIDER"
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
-for cmd in vault terraform ssh scp ssh-keyscan envsubst; do
-    command -v "$cmd" &>/dev/null || error "Required tool not found: $cmd"
-done
+validate_external_utils vault terraform ssh scp ssh-keyscan envsubst curl python3 || exit 1
 
 [ -f .vault.token ] || error ".vault.token not found. Run ./setup.sh first."
 [ -f .vault-keys ]  || error ".vault-keys not found. Run ./setup.sh first."

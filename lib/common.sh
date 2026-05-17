@@ -36,3 +36,59 @@ _run() {
         "$@"
     fi
 }
+
+# ── External utility validator ─────────────────────────────────────────────────
+
+# Binary → apt package for tools not included in a minimal Debian installation.
+declare -A _UTIL_APT_PKG=(
+    [curl]="curl"
+    [git]="git"
+    [python3]="python3"
+    [zstd]="zstd"
+    [envsubst]="gettext-base"
+    [uuidgen]="uuid-runtime"
+    [openssl]="openssl"
+    [ssh]="openssh-client"
+    [scp]="openssh-client"
+    [ssh-keygen]="openssh-client"
+    [ssh-keyscan]="openssh-client"
+    [aws]="awscli"
+    [ykman]="python3-yubikey-manager"
+)
+
+# Binary → install note for tools not available via apt.
+declare -A _UTIL_MANUAL_PKG=(
+    [vault]="HashiCorp Vault — https://developer.hashicorp.com/vault/install"
+    [terraform]="HashiCorp Terraform — https://developer.hashicorp.com/terraform/install"
+)
+
+# validate_external_utils TOOL [TOOL ...]
+# Verify each TOOL is in PATH. For any that are missing, print a consolidated
+# "sudo apt install ..." line for apt-installable tools and per-tool notes for
+# tools that require manual installation. Returns 1 if anything is missing.
+validate_external_utils() {
+    local -a _apt=() _manual=()
+    local -A _seen=()
+    local _cmd _pkg
+
+    for _cmd in "$@"; do
+        command -v "$_cmd" &>/dev/null && continue
+
+        if [[ -n "${_UTIL_APT_PKG[$_cmd]:-}" ]]; then
+            _pkg="${_UTIL_APT_PKG[$_cmd]}"
+            # Deduplicate: ssh/scp/ssh-keygen all map to openssh-client.
+            [[ -z "${_seen[$_pkg]:-}" ]] && { _apt+=("$_pkg"); _seen[$_pkg]=1; }
+        elif [[ -n "${_UTIL_MANUAL_PKG[$_cmd]:-}" ]]; then
+            _manual+=("  $_cmd: ${_UTIL_MANUAL_PKG[$_cmd]}")
+        else
+            _manual+=("  $_cmd: (no install hint — check your PATH)")
+        fi
+    done
+
+    [[ ${#_apt[@]} -eq 0 && ${#_manual[@]} -eq 0 ]] && return 0
+
+    printf '%b\n' "${RED}[error]${NC} Missing required tools — install and retry:" >&2
+    [[ ${#_apt[@]} -gt 0 ]] && printf '  sudo apt install %s\n' "${_apt[*]}" >&2
+    printf '%s\n' "${_manual[@]}" >&2
+    return 1
+}

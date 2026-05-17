@@ -16,9 +16,7 @@ error() { echo -e "${RED}[setup]${NC} $*" >&2; exit 1; }
 
 # ── 1. Prerequisite check ─────────────────────────────────────────────────────
 info "Checking prerequisites..."
-for cmd in ykman vault ssh-keygen openssl; do
-    command -v "$cmd" &>/dev/null || error "Required tool not found: $cmd"
-done
+validate_external_utils ykman vault ssh-keygen openssl || exit 1
 
 ykman info &>/dev/null || error "No Yubikey detected. Connect your Yubikey and try again."
 

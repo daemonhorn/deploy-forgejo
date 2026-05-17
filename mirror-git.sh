@@ -149,9 +149,7 @@ done
 [[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
-for _cmd in git curl python3 ssh ssh-keyscan; do
-    command -v "$_cmd" &>/dev/null || error "Required: $_cmd (install it and retry)"
-done
+validate_external_utils git curl python3 ssh ssh-keyscan || exit 1
 [[ -f "$SSH_KEY" ]] || error "SSH key not found: $SSH_KEY (set --ssh-key or ADMIN_SSH_KEY)"
 
 _ssl_flag=""

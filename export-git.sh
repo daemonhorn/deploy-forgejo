@@ -123,9 +123,7 @@ done
 [[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
-for _cmd in git curl python3 tar zstd; do
-    command -v "$_cmd" &>/dev/null || error "Required tool not found: $_cmd (install it and retry)"
-done
+validate_external_utils git curl python3 zstd || exit 1
 
 # ── Output path ───────────────────────────────────────────────────────────────
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
