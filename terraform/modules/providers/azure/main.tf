@@ -28,8 +28,8 @@ resource "time_sleep" "rg_propagation" {
 }
 
 resource "azurerm_virtual_network" "main" {
-  name     = "${var.hostname}-vnet"
-  location = azurerm_resource_group.main.location
+  name                = "${var.hostname}-vnet"
+  location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
 
   # dual/ipv6 mode: add a ULA IPv6 /48; Azure maps private IPv6 addresses from
@@ -42,9 +42,9 @@ resource "azurerm_virtual_network" "main" {
   # The NSG is associated here so VNet destruction atomically removes the
   # subnet + its NSG link before the NSG delete runs — no ordering race.
   subnet {
-    name           = "${var.hostname}-subnet"
+    name             = "${var.hostname}-subnet"
     address_prefixes = var.ip_stack != "ipv4" ? ["10.0.1.0/24", "ace:cab:deca:deed::/64"] : ["10.0.1.0/24"]
-    security_group = azurerm_network_security_group.main.id
+    security_group   = azurerm_network_security_group.main.id
   }
 
   # Azure may back-fill subnet defaults on subsequent reads; ignore to prevent
@@ -82,12 +82,26 @@ resource "azurerm_public_ip" "ipv6" {
 }
 
 locals {
-  # Build a map of port → priority (100, 101, …) for the NSG dynamic block.
-  # Map keys are strings (port numbers); map values carry both port and priority
-  # so the content block has everything it needs without calling index().
-  firewall_rules = {
-    for idx, port in var.firewall_ports :
+  # Split allowed_cidrs into IPv4 and IPv6.
+  allowed_v4_cidrs = [for c in var.allowed_cidrs : c if !strcontains(c, ":")]
+  allowed_v6_cidrs = [for c in var.allowed_cidrs : c if strcontains(c, ":")]
+
+  # All admin CIDRs relevant to the current ip_stack (used in NSG rules).
+  effective_admin_cidrs = concat(
+    var.ip_stack != "ipv6" ? local.allowed_v4_cidrs : [],
+    var.ip_stack != "ipv4" ? local.allowed_v6_cidrs : []
+  )
+
+  # Ports open to the world (not in admin_only_ports) — priority block 100–199.
+  public_port_rules = {
+    for idx, port in [for p in var.firewall_ports : p if !contains(var.admin_only_ports, p)] :
     tostring(port) => { port = port, priority = 100 + idx }
+  }
+
+  # Admin-only ports — priority block 200–299.
+  admin_port_rules = {
+    for idx, port in var.admin_only_ports :
+    tostring(port) => { port = port, priority = 200 + idx }
   }
 
   # Extract the inline subnet ID from the VNet resource.
@@ -120,12 +134,12 @@ resource "azurerm_network_security_group" "main" {
   resource_group_name = azurerm_resource_group.main.name
   depends_on          = [time_sleep.rg_propagation]
 
-  # source_address_prefix = "*" matches any source including IPv6, so no
-  # separate IPv6 rules are needed — NSG rules apply to both address families.
+  # World-open inbound rules for public ports (80, 443).
+  # source_address_prefix = "*" covers both IPv4 and IPv6.
   dynamic "security_rule" {
-    for_each = local.firewall_rules
+    for_each = local.public_port_rules
     content {
-      name                       = "allow-${security_rule.key}"
+      name                       = "allow-public-${security_rule.key}"
       priority                   = security_rule.value.priority
       direction                  = "Inbound"
       access                     = "Allow"
@@ -133,6 +147,23 @@ resource "azurerm_network_security_group" "main" {
       source_port_range          = "*"
       destination_port_range     = tostring(security_rule.value.port)
       source_address_prefix      = "*"
+      destination_address_prefix = "*"
+    }
+  }
+
+  # Admin-only inbound rules for SSH ports (22, 2222).
+  # source_address_prefixes accepts a mixed IPv4/IPv6 list.
+  dynamic "security_rule" {
+    for_each = length(local.effective_admin_cidrs) > 0 ? local.admin_port_rules : {}
+    content {
+      name                       = "allow-admin-${security_rule.key}"
+      priority                   = security_rule.value.priority
+      direction                  = "Inbound"
+      access                     = "Allow"
+      protocol                   = "Tcp"
+      source_port_range          = "*"
+      destination_port_range     = tostring(security_rule.value.port)
+      source_address_prefixes    = local.effective_admin_cidrs
       destination_address_prefix = "*"
     }
   }
@@ -181,7 +212,7 @@ resource "azurerm_linux_virtual_machine" "main" {
   }
 
   os_disk {
-    caching              = "ReadWrite"
+    caching = "ReadWrite"
     # Standard_LRS (HDD) is the lowest-cost disk tier; sufficient for a single-user Forgejo.
     storage_account_type = "Standard_LRS"
     disk_size_gb         = 30

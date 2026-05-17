@@ -21,10 +21,12 @@ provider "aws" {
 module "infra" {
   source = "../modules/providers/aws"
 
-  ssh_public_key = var.admin_ssh_public_key
-  region         = var.region
-  plan           = var.plan
-  hostname       = var.hostname
-  firewall_ports = var.firewall_ports
-  ip_stack       = var.ip_stack
+  ssh_public_key   = var.admin_ssh_public_key
+  region           = var.region
+  plan             = var.plan
+  hostname         = var.hostname
+  firewall_ports   = var.firewall_ports
+  admin_only_ports = var.admin_only_ports
+  allowed_cidrs    = var.allowed_cidrs
+  ip_stack         = var.ip_stack
 }

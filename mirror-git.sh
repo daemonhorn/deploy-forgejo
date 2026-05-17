@@ -100,6 +100,7 @@ INCLUDE_WIKIS=true
 INCLUDE_ARCHIVED=true
 INSECURE=false
 SSH_KEY="${ADMIN_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+ADMIN_CIDRS=""
 # Forgejo ≥7.0 requires explicit token scopes; enumerate them rather than relying on
 # the 'all' shorthand, which has been unreliable in some Forgejo 15.x builds.
 _FORGEJO_ADMIN_SCOPES="read:activitypub,write:activitypub,read:admin,write:admin,read:issue,write:issue,read:misc,write:misc,read:notification,write:notification,read:organization,write:organization,read:package,write:package,read:repository,write:repository,read:user,write:user"
@@ -134,6 +135,8 @@ while [[ $# -gt 0 ]]; do
         --no-wikis)       INCLUDE_WIKIS=false; shift ;;
         --no-archived)    INCLUDE_ARCHIVED=false; shift ;;
         --insecure)       INSECURE=true; shift ;;
+        --admin-cidrs)    [[ $# -ge 2 ]] || error "--admin-cidrs requires a value (comma-separated CIDRs)"
+                          ADMIN_CIDRS="$2"; shift 2 ;;
         --quiet)          QUIET=true; shift ;;
         --debug)          DEBUG=1; shift ;;
         --help|-h)
@@ -414,12 +417,15 @@ if [[ -z "$DEST_URL" ]]; then
     [[ -n "$DEST_REGION" ]] || error "--dest-region is required when provisioning"
     [[ -n "$DEST_PLAN" ]]   || error "--dest-plan is required when provisioning"
     info "Provisioning destination (provider=${DEST_PROVIDER} region=${DEST_REGION} plan=${DEST_PLAN} workspace=${DEST_WORKSPACE})..."
-    "$SCRIPT_DIR/provision.sh" \
-        --non-interactive \
-        --provider  "$DEST_PROVIDER" \
-        --region    "$DEST_REGION" \
-        --plan      "$DEST_PLAN" \
+    _provision_args=(
+        --non-interactive
+        --provider  "$DEST_PROVIDER"
+        --region    "$DEST_REGION"
+        --plan      "$DEST_PLAN"
         --workspace "$DEST_WORKSPACE"
+    )
+    [[ -n "$ADMIN_CIDRS" ]] && _provision_args+=(--admin-cidrs "$ADMIN_CIDRS")
+    "$SCRIPT_DIR/provision.sh" "${_provision_args[@]}"
     _dest_ip="$(cd "$SCRIPT_DIR/terraform/$DEST_PROVIDER" && \
         terraform workspace select "$DEST_WORKSPACE" >/dev/null 2>&1 && \
         terraform output -raw public_ipv4 2>/dev/null || true)"

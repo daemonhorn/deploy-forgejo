@@ -2,7 +2,7 @@
 # deploy.sh — Runs on the VPS (as root) to install and start all services.
 #
 # Invoked by provision.sh via SSH. Required env vars (injected by provision.sh):
-#   DOMAIN, IP_STACK, IPV6, CERTBOT_EMAIL, FORGEJO_ADMIN_USER,
+#   DOMAIN, IP_STACK, IPV6, ADMIN_CIDRS, CERTBOT_EMAIL, FORGEJO_ADMIN_USER,
 #   FORGEJO_ADMIN_EMAIL, FORGEJO_ADMIN_PASSWORD, ADMIN_SSH_PUBLIC_KEY
 #
 # Idempotent: each step checks before acting, safe to re-run.
@@ -60,10 +60,13 @@ apt-get $APT_OPTS upgrade -y \
     -o Dpkg::Options::="--force-confold"
 info "System packages up to date."
 
-# ── 0. Configure host firewall (UFW) ─────────────────────────────────────────
-# Docker bypasses UFW for container-mapped ports (80, 443), but host services
-# like sshd-forgejo on port 2222 go through UFW. Allow required ports explicitly.
-# The Vultr cloud firewall is the perimeter control; UFW provides host-level defense.
+# ── 0. Configure host firewall ────────────────────────────────────────────────
+# UFW is used for host services (sshd-forgejo on port 2222) where it applies.
+# Docker bypasses UFW for container-mapped ports (80, 443) by inserting rules
+# into the DOCKER chain; those ports are controlled via the DOCKER-USER iptables
+# chain instead, which Docker honours before its own forwarding rules.
+ADMIN_CIDRS="${ADMIN_CIDRS:-}"
+
 if command -v ufw &>/dev/null; then
     info "Configuring UFW firewall rules..."
     ufw allow 22/tcp   comment 'SSH admin'    >/dev/null
@@ -71,6 +74,91 @@ if command -v ufw &>/dev/null; then
     ufw allow 443/tcp  comment 'HTTPS'        >/dev/null
     ufw allow 2222/tcp comment 'Forgejo SSH'  >/dev/null
     info "UFW rules updated."
+fi
+
+# Write /etc/forgejo-admin-cidrs (one CIDR per line) so forgejo-fw-apply.sh
+# and the certbot hooks can read the admin network without re-running provision.sh.
+if [[ -n "$ADMIN_CIDRS" ]]; then
+    printf '%s\n' "${ADMIN_CIDRS//,/$'\n'}" | grep -v '^[[:space:]]*$' \
+        > /etc/forgejo-admin-cidrs
+    chmod 600 /etc/forgejo-admin-cidrs
+    info "Admin CIDRs written: $ADMIN_CIDRS"
+fi
+
+# Install forgejo-fw-apply.sh: applies DOCKER-USER iptables rules for ports
+# 80/443 to restrict them to the admin network in steady state.
+cat > /usr/local/bin/forgejo-fw-apply.sh << 'FWSCRIPT'
+#!/bin/bash
+# Restrict ports 80 and 443 in the DOCKER-USER iptables chain to admin CIDRs.
+# Runs on boot (forgejo-fw.service, after docker.service) and after certbot renewal.
+set -euo pipefail
+CIDRS_FILE="/etc/forgejo-admin-cidrs"
+
+# Ensure DOCKER-USER chain exists (Docker creates it on first start; we may run before that).
+iptables  -L DOCKER-USER -n >/dev/null 2>&1 || iptables  -N DOCKER-USER
+ip6tables -L DOCKER-USER -n >/dev/null 2>&1 || ip6tables -N DOCKER-USER
+
+# Flush our DOCKER-USER entries (Docker manages its own chains separately).
+iptables -F DOCKER-USER 2>/dev/null || true
+ip6tables -F DOCKER-USER 2>/dev/null || true
+
+# Always allow established/related traffic so the flush doesn't cut live sessions.
+iptables -I DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+ip6tables -I DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+
+[[ -f "$CIDRS_FILE" ]] || { echo "[forgejo-fw] No $CIDRS_FILE — skipping port 80/443 restriction."; exit 0; }
+
+mapfile -t ALL_CIDRS < <(grep -v '^[[:space:]]*$' "$CIDRS_FILE" || true)
+V4_CIDRS=(); V6_CIDRS=()
+for c in "${ALL_CIDRS[@]}"; do
+    [[ "$c" == *:* ]] && V6_CIDRS+=("$c") || V4_CIDRS+=("$c")
+done
+
+for port in 80 443; do
+    for cidr in "${V4_CIDRS[@]}"; do
+        iptables -I DOCKER-USER -p tcp --dport "$port" -s "$cidr" -j RETURN
+    done
+    [[ ${#V4_CIDRS[@]} -gt 0 ]] && iptables -A DOCKER-USER -p tcp --dport "$port" -j DROP
+    for cidr in "${V6_CIDRS[@]}"; do
+        ip6tables -I DOCKER-USER -p tcp --dport "$port" -s "$cidr" -j RETURN
+    done
+    [[ ${#V6_CIDRS[@]} -gt 0 ]] && ip6tables -A DOCKER-USER -p tcp --dport "$port" -j DROP
+done
+echo "[forgejo-fw] Applied admin-CIDR restrictions for ports 80/443."
+FWSCRIPT
+chmod 755 /usr/local/bin/forgejo-fw-apply.sh
+
+# Install forgejo-fw-open-http.sh: temporarily allows all traffic to port 80
+# for ACME HTTP-01 validation. Called by certbot-renew.service ExecStartPre.
+cat > /usr/local/bin/forgejo-fw-open-http.sh << 'OPENSCRIPT'
+#!/bin/bash
+# Temporarily allow all traffic on port 80 for certbot ACME HTTP-01 challenge.
+iptables  -I DOCKER-USER 1 -p tcp --dport 80 -j RETURN 2>/dev/null || true
+ip6tables -I DOCKER-USER 1 -p tcp --dport 80 -j RETURN 2>/dev/null || true
+echo "[forgejo-fw] Port 80 opened for certbot."
+OPENSCRIPT
+chmod 755 /usr/local/bin/forgejo-fw-open-http.sh
+
+# Install forgejo-fw.service: re-applies admin-CIDR restrictions after Docker
+# starts (Docker flushes iptables chains on daemon restart).
+if [ ! -f /etc/systemd/system/forgejo-fw.service ]; then
+    cat > /etc/systemd/system/forgejo-fw.service << 'FWSVC'
+[Unit]
+Description=Forgejo admin-CIDR firewall (DOCKER-USER iptables)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/forgejo-fw-apply.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+FWSVC
+    systemctl daemon-reload
+    systemctl enable forgejo-fw.service
+    info "Installed forgejo-fw.service."
 fi
 
 # ── 1. Install Docker Engine ──────────────────────────────────────────────────
@@ -480,15 +568,26 @@ info "  vault kv get -field=admin_password secret/forgejo/deploy"
 info "Starting Forgejo SSH daemon on port 2222..."
 systemctl start sshd-forgejo
 
+# Apply admin-CIDR restrictions for ports 80/443 now that Docker is running.
+# forgejo-fw.service handles subsequent boots; this call handles the current session.
+if [[ -f /etc/forgejo-admin-cidrs ]]; then
+    info "Applying admin-CIDR firewall rules for ports 80/443..."
+    systemctl start forgejo-fw.service || /usr/local/bin/forgejo-fw-apply.sh || true
+fi
+
 # ── 13. Certbot renewal timer (belt-and-suspenders) ──────────────────────────
-if [ ! -f /etc/systemd/system/certbot-renew.timer ]; then
-    info "Installing certbot renewal systemd timer..."
-    cat > /etc/systemd/system/certbot-renew.service << EOF
+# Always (re)write the service file so that ExecStartPre/Post hooks stay current
+# even when re-deploying onto an existing instance.
+info "Installing/updating certbot renewal systemd timer..."
+cat > /etc/systemd/system/certbot-renew.service << EOF
 [Unit]
 Description=Certbot renewal for Forgejo (short-lived IP cert)
 
 [Service]
 Type=oneshot
+# Open port 80 to the world before ACME HTTP-01 validation, then restore
+# admin-CIDR restrictions after renewal completes.
+ExecStartPre=/usr/local/bin/forgejo-fw-open-http.sh
 ExecStart=/usr/bin/docker compose -f $WORKDIR/docker-compose.yml \
   --env-file $WORKDIR/.env \
   --project-directory $WORKDIR \
@@ -497,7 +596,9 @@ ExecStart=/usr/bin/docker compose -f $WORKDIR/docker-compose.yml \
   certbot renew --quiet --webroot --webroot-path=/var/www/certbot \
   --preferred-profile shortlived
 ExecStartPost=/usr/bin/docker exec \$(docker compose -f $WORKDIR/docker-compose.yml --project-directory $WORKDIR ps -q nginx) nginx -s reload
+ExecStartPost=/usr/local/bin/forgejo-fw-apply.sh
 EOF
+if [ ! -f /etc/systemd/system/certbot-renew.timer ]; then
     cat > /etc/systemd/system/certbot-renew.timer << 'EOF'
 [Unit]
 Description=Certbot renewal — every 12 h (short-lived certs expire in 6 days)
@@ -510,9 +611,9 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-    systemctl daemon-reload
-    systemctl enable --now certbot-renew.timer
 fi
+systemctl daemon-reload
+systemctl enable --now certbot-renew.timer
 
 # ── 14. Docker image update timer ────────────────────────────────────────────
 # Pulls latest image digests daily and recreates any container whose image changed.
