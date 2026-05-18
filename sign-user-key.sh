@@ -110,6 +110,18 @@ resolve_forgejo_credentials() {
         fi
         local _ssh_key="${ADMIN_SSH_KEY:-$HOME/.ssh/id_ed25519}"
         local _kh="$SCRIPT_DIR/known_hosts.deploy"
+        # Ensure the target IP is in known_hosts.deploy (TOFU: scan once, verify after).
+        if ! ssh-keygen -F "$_ip" -f "$_kh" &>/dev/null 2>&1; then
+            info "Scanning SSH host key for $_ip and adding to known_hosts.deploy..."
+            local _scanned
+            _scanned="$(ssh-keyscan -T 10 "$_ip" 2>/dev/null || true)"
+            if [[ -z "$_scanned" ]]; then
+                warn "ssh-keyscan returned nothing for $_ip — falling back to StrictHostKeyChecking=no"
+            else
+                printf '%s\n' "$_scanned" >> "$_kh"
+                info "Host key recorded."
+            fi
+        fi
         local _ssh_opts="-i $_ssh_key -o CanonicalizeHostname=no -o ConnectTimeout=15 -o BatchMode=yes"
         [[ -f "$_kh" ]] \
             && _ssh_opts="$_ssh_opts -o UserKnownHostsFile=$_kh -o StrictHostKeyChecking=yes" \
