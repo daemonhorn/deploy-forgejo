@@ -595,7 +595,7 @@ ExecStart=/usr/bin/docker compose -f $WORKDIR/docker-compose.yml \
   certbot \
   certbot renew --quiet --webroot --webroot-path=/var/www/certbot \
   --preferred-profile shortlived
-ExecStartPost=/usr/bin/docker exec \$(docker compose -f $WORKDIR/docker-compose.yml --project-directory $WORKDIR ps -q nginx) nginx -s reload
+ExecStartPost=/usr/bin/docker compose -f $WORKDIR/docker-compose.yml --project-directory $WORKDIR exec -T nginx nginx -s reload
 ExecStartPost=/usr/local/bin/forgejo-fw-apply.sh
 EOF
 if [ ! -f /etc/systemd/system/certbot-renew.timer ]; then
