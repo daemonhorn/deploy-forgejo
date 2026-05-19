@@ -276,6 +276,52 @@ else
 fi
 $_lockdown_runtime_active || warn "Kernel lockdown will be fully active after the next reboot."
 
+# ── 1e. fail2ban — SSH brute-force protection ─────────────────────────────────
+info "Installing and configuring fail2ban..."
+apt-get $APT_OPTS install -y fail2ban
+
+# Custom filter: matches forgejo-auth syslog entries (journald, tag forgejo-auth).
+# Catches cert-required denials logged by forgejo-keys.sh from $SSH_CONNECTION.
+mkdir -p /etc/fail2ban/filter.d
+cat > /etc/fail2ban/filter.d/forgejo-auth.conf << 'F2BFILTER'
+[Definition]
+# Matches: ts=... client=<HOST> user=... mode=raw result=denied:cert_required
+# client= field is set by forgejo-keys.sh from the SSH_CONNECTION environment variable.
+failregex = \bclient=<HOST>\b.+\bresult=denied
+ignoreregex =
+F2BFILTER
+
+cat > /etc/fail2ban/jail.local << 'F2BJAIL'
+[DEFAULT]
+bantime   = 1h
+findtime  = 10m
+maxretry  = 5
+banaction  = iptables-multiport
+banaction6 = ip6tables-multiport
+
+[sshd]
+enabled  = true
+port     = ssh
+logpath  = /var/log/auth.log
+maxretry = 5
+
+# Bans IPs with repeated cert-only enforcement denials on the Forgejo git SSH port.
+# Higher maxretry than [sshd] because legitimate users may retry briefly during cert
+# rollout before they receive a freshly signed certificate.
+[forgejo-sshd]
+enabled      = true
+port         = 2222
+filter       = forgejo-auth
+backend      = systemd
+journalmatch = SYSLOG_IDENTIFIER=forgejo-auth
+maxretry     = 10
+bantime      = 1h
+findtime     = 10m
+F2BJAIL
+
+systemctl enable --now fail2ban
+info "fail2ban configured (sshd + forgejo-sshd jails active)."
+
 # ── 2. Create system git user ─────────────────────────────────────────────────
 if ! id git &>/dev/null; then
     info "Creating git system user..."
@@ -705,40 +751,33 @@ echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 warn "Additional hardening recommendations:"
 echo
-echo "  1. FAIL2BAN  Blocks SSH brute-force attempts:"
-echo "       apt install fail2ban"
-echo "       configure /etc/fail2ban/jail.local with [sshd] ban settings"
-echo
-echo "  2. AUDITD    Syscall-level audit log for intrusion forensics:"
+echo "  1. AUDITD    Syscall-level audit log for intrusion forensics:"
 echo "       apt install auditd"
 echo "       auditctl -a always,exit -F arch=b64 -S execve -k exec_log"
 echo
-echo "  3. DOCKER SOCKET PROXY  Limit container access to the Docker socket"
+echo "  2. DOCKER SOCKET PROXY  Limit container access to the Docker socket"
 echo "       using Tecnativa/docker-socket-proxy rather than raw /var/run/docker.sock"
 echo
-echo "  4. SSH PORT  Move admin SSH to a non-standard port (e.g. 2223):"
+echo "  3. SSH PORT  Move admin SSH to a non-standard port (e.g. 2223):"
 echo "       update Port in /etc/ssh/sshd_config.d/99-hardening.conf"
 echo "       ufw allow 2223/tcp; ufw delete allow 22/tcp"
 echo "       update provision.sh SSH_OPTS and cloud firewall group"
 echo
-echo "  5. WAF / CDN  Place Forgejo behind Cloudflare Tunnel or a WAF"
+echo "  4. WAF / CDN  Place Forgejo behind Cloudflare Tunnel or a WAF"
 echo "       to filter malicious HTTP before it reaches nginx"
 echo
-echo "  6. FILE INTEGRITY  AIDE detects unauthorized file changes:"
+echo "  5. FILE INTEGRITY  AIDE detects unauthorized file changes:"
 echo "       apt install aide; aideinit"
 echo "       run 'aide --check' periodically (schedule via systemd timer)"
 echo
-echo "  7. ROOTLESS DOCKER  Eliminate the docker=root equivalence:"
+echo "  6. ROOTLESS DOCKER  Eliminate the docker=root equivalence:"
 echo "       https://docs.docker.com/engine/security/rootless/"
 echo "       Requires updated docker-compose.yml volume paths"
 echo
-echo "  8. NGINX TLS HARDENING  Enforce TLS 1.2+, HSTS, and OCSP stapling"
-echo "       in nginx.conf.tmpl; test with https://www.ssllabs.com/ssltest/"
-echo
-echo "  9. IPv6  Disable if unused to reduce attack surface:"
+echo "  7. IPv6  Disable if unused to reduce attack surface:"
 echo "       echo 'net.ipv6.conf.all.disable_ipv6=1' >> /etc/sysctl.d/99-local.conf"
 echo "       sysctl --system"
 echo
-echo " 10. SECRETS ROTATION  Rotate Vault unseal key after any suspected"
+echo "  8. SECRETS ROTATION  Rotate Vault unseal key after any suspected"
 echo "       compromise. CA rotation invalidates all issued user certificates."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
