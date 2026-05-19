@@ -86,22 +86,22 @@ locals {
   allowed_v4_cidrs = [for c in var.allowed_cidrs : c if !strcontains(c, ":")]
   allowed_v6_cidrs = [for c in var.allowed_cidrs : c if strcontains(c, ":")]
 
-  # All admin CIDRs relevant to the current ip_stack (used in NSG rules).
-  effective_admin_cidrs = concat(
-    var.ip_stack != "ipv6" ? local.allowed_v4_cidrs : [],
-    var.ip_stack != "ipv4" ? local.allowed_v6_cidrs : []
-  )
-
   # Ports open to the world (not in admin_only_ports) — priority block 100–199.
   public_port_rules = {
     for idx, port in [for p in var.firewall_ports : p if !contains(var.admin_only_ports, p)] :
     tostring(port) => { port = port, priority = 100 + idx }
   }
 
-  # Admin-only ports — priority block 200–299.
-  admin_port_rules = {
+  # Admin-only ports split by address family.
+  # Azure NSG rules reject source_address_prefixes that mix IPv4 and IPv6.
+  # v4 rules: priority block 200–219; v6 rules: priority block 220–239.
+  admin_v4_port_rules = {
     for idx, port in var.admin_only_ports :
     tostring(port) => { port = port, priority = 200 + idx }
+  }
+  admin_v6_port_rules = {
+    for idx, port in var.admin_only_ports :
+    tostring(port) => { port = port, priority = 220 + idx }
   }
 
   # Extract the inline subnet ID from the VNet resource.
@@ -151,19 +151,35 @@ resource "azurerm_network_security_group" "main" {
     }
   }
 
-  # Admin-only inbound rules for SSH ports (22, 2222).
-  # source_address_prefixes accepts a mixed IPv4/IPv6 list.
+  # Admin-only inbound rules — IPv4 (priority block 200–219).
+  # Separate from IPv6 block: Azure rejects rules mixing address families in source_address_prefixes.
   dynamic "security_rule" {
-    for_each = length(local.effective_admin_cidrs) > 0 ? local.admin_port_rules : {}
+    for_each = var.ip_stack != "ipv6" && length(local.allowed_v4_cidrs) > 0 ? local.admin_v4_port_rules : {}
     content {
-      name                       = "allow-admin-${security_rule.key}"
+      name                       = "allow-admin-${security_rule.key}-v4"
       priority                   = security_rule.value.priority
       direction                  = "Inbound"
       access                     = "Allow"
       protocol                   = "Tcp"
       source_port_range          = "*"
       destination_port_range     = tostring(security_rule.value.port)
-      source_address_prefixes    = local.effective_admin_cidrs
+      source_address_prefixes    = local.allowed_v4_cidrs
+      destination_address_prefix = "*"
+    }
+  }
+
+  # Admin-only inbound rules — IPv6 (priority block 220–239).
+  dynamic "security_rule" {
+    for_each = var.ip_stack != "ipv4" && length(local.allowed_v6_cidrs) > 0 ? local.admin_v6_port_rules : {}
+    content {
+      name                       = "allow-admin-${security_rule.key}-v6"
+      priority                   = security_rule.value.priority
+      direction                  = "Inbound"
+      access                     = "Allow"
+      protocol                   = "Tcp"
+      source_port_range          = "*"
+      destination_port_range     = tostring(security_rule.value.port)
+      source_address_prefixes    = local.allowed_v6_cidrs
       destination_address_prefix = "*"
     }
   }
