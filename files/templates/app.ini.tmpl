@@ -5,7 +5,7 @@ APP_NAME = Forgejo
 ; Push to a non-existent repo to create it automatically (user-owned).
 ENABLE_PUSH_CREATE_USER      = true
 ; go get uses SSH clone URLs (matches SSH_DOMAIN alias and DISABLE_HTTP_GIT).
-GO_GET_CLONE_URL_PROTOCOL    = ssh
+GO_GET_CLONE_URL_PROTOCOL    = SSH
 ; Same for organisation-owned repos.
 ;ENABLE_PUSH_CREATE_ORG  = false
 ; Default branch name for new repos.
@@ -29,10 +29,10 @@ LOCAL_ROOT_URL = http://127.0.0.1:3000/
 ; SSH_DOMAIN matches the Host alias in the generated SSH client config (sign-user-key.sh --batch),
 ; so Forgejo emits clone URLs like git@forgejo:user/repo.git that resolve via ~/.ssh/config.
 SSH_DOMAIN     = forgejo
-SSH_PORT       = 2222
-; USE_COMPAT_SSH_URI emits scp-style git@forgejo:user/repo.git clone URLs (no explicit port).
-; The correct port (2222) comes from the SSH client config Host alias, not the URL.
-USE_COMPAT_SSH_URI                = true
+; SSH_PORT omitted — defaults to 22; actual port (2222) comes from ~/.ssh/config Host alias.
+; USE_COMPAT_SSH_URI = false emits ssh://git@forgejo/user/repo.git (RFC-compliant URI).
+; The host alias in the generated SSH client config resolves the correct port transparently.
+USE_COMPAT_SSH_URI                = false
 ; Block HTTP(S) git protocol — all git operations must go over SSH.
 DISABLE_HTTP_GIT                  = true
 ; SSH handled by host sshd (see sshd_forgejo.conf deployed by deploy.sh).
@@ -63,7 +63,7 @@ DISABLE_REGISTRATION        = true
 ; Require sign-in to view any page.
 REQUIRE_SIGNIN_VIEW                = true
 ; Keep user email addresses private by default.
-;DEFAULT_KEEP_EMAIL_PRIVATE         = false
+DEFAULT_KEEP_EMAIL_PRIVATE         = true
 ; Allow users to create organisations.
 ;DEFAULT_ALLOW_CREATE_ORGANIZATION  = true
 ; Set newly created users as restricted (read-only until explicitly granted access).
@@ -159,7 +159,15 @@ MAX_SIZE      = 2048            ; MiB per file
 ;ALLOWED_HOST_LIST = external  ; external | * | comma-separated hosts/CIDRs
 
 ; ── Logging ───────────────────────────────────────────────────────────────────
+; Containerised deployment: all subsystems routed to stdout so Docker captures
+; everything via `docker logs`. No file logger needed.
 [log]
-MODE  = console
-LEVEL = warn
-;LEVEL = info                   ; use 'info' or 'debug' when troubleshooting
+MODE              = console
+LEVEL             = info
+ROUTER            = console
+ACCESS            = console
+ENABLE_ACCESS_LOG = true
+
+[log.console]
+LEVEL  = info
+STDERR = false
