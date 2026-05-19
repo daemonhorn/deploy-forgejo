@@ -709,9 +709,14 @@ _destroy_workspace() {
     info "Destroying $PROVIDER infrastructure for workspace '${ws}' (IP: ${_display_addr})..."
     destroy_args=(-auto-approve -input=false)
     [[ "$ws" != "default" && -f "$wsfile" ]] && destroy_args+=(-var-file="$wsfile")
-    _run terraform destroy "${destroy_args[@]}"
+    local _tf_rc=0
+    _run terraform destroy "${destroy_args[@]}" || _tf_rc=$?
+    if [[ $_tf_rc -ne 0 ]]; then
+        warn "terraform destroy for '${ws}' exited rc=${_tf_rc} — resources may already be gone."
+    fi
 
     # Write log entry before workspace delete so the record exists even if delete fails.
+    # Write even on terraform failure so the workspace is not retried by --destroy-all.
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     _log_event "$(printf '{"action":"destroy","ts":"%s","provider":"%s","workspace":"%s","ip":"%s","ipv6":"%s","ip_stack":"%s","region":"","plan":""}' \
         "$ts" "$PROVIDER" "$ws" "$ip" "$ipv6" "$ip_stack")"
@@ -728,6 +733,10 @@ _destroy_workspace() {
         || warn "Could not remove Vault secret for '${ws}' — manual cleanup: vault kv metadata delete secret/forgejo/instances/${PROVIDER}-${ws}"
 
     cd "$SCRIPT_DIR"
+    if [[ $_tf_rc -ne 0 ]]; then
+        warn "Workspace '${ws}' cleanup attempted despite destroy error (rc=${_tf_rc})."
+        return 1
+    fi
     info "Destroy complete for workspace '${ws}'."
 }
 
@@ -754,13 +763,18 @@ for r in json.loads(sys.argv[1]):
         r.get('workspace','default'), ip_str,
         r.get('region',''), r.get('plan','')))
 " "$_instances_json"
+            _failed_ws=()
             while IFS= read -r _rec; do
                 _ws="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('workspace','default'))" "$_rec")"
                 _ip="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip',''))" "$_rec")"
                 _ipv6="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ipv6',''))" "$_rec")"
                 _ip_stack="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip_stack',''))" "$_rec")"
-                _destroy_workspace "$_ws" "$_ip" "$_ipv6" "$_ip_stack"
+                _destroy_workspace "$_ws" "$_ip" "$_ipv6" "$_ip_stack" \
+                    || _failed_ws+=("$_ws")
             done < <(python3 -c "import json,sys; [print(json.dumps(r)) for r in json.loads(sys.argv[1])]" "$_instances_json")
+            if [[ ${#_failed_ws[@]} -gt 0 ]]; then
+                warn "Destroy errors for workspace(s): ${_failed_ws[*]} — see warnings above."
+            fi
         fi
         info "All destroy operations complete."
         exit 0
