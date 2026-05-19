@@ -130,7 +130,33 @@ if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "302" ]]; then
     exit 1
 fi
 
-log "New instance healthy (HTTP $HTTP_CODE). Proceeding to destroy old instance."
+log "New instance healthy (HTTP $HTTP_CODE)."
+
+# ── Step 4b: Cert-only enforcement regression test ────────────────────────────
+# Verify that the new instance rejects raw key auth on port 2222.
+# A regression here means forgejo-keys.sh shipped with the cert-only block removed.
+log "Running cert-only enforcement regression test on port 2222..."
+_raw_key_tmp="$(mktemp)"
+trap 'rm -f "$_raw_key_tmp" "${_raw_key_tmp}.pub"' EXIT
+ssh-keygen -t ed25519 -N "" -f "$_raw_key_tmp" -q
+_raw_auth_out="$(ssh \
+    -i "$_raw_key_tmp" \
+    -o IdentitiesOnly=yes \
+    -o CertificateFile=none \
+    -o BatchMode=yes \
+    -o ConnectTimeout=10 \
+    -o StrictHostKeyChecking=no \
+    -p 2222 "git@$NEW_IP" 2>&1 || true)"
+if echo "$_raw_auth_out" | grep -qiE 'Permission denied|publickey'; then
+    log "Cert-only enforcement: raw key correctly denied (regression test passed)."
+else
+    log "ERROR: cert-only regression — unexpected output: $_raw_auth_out" >&2
+    log "ERROR: Raw key may have been accepted. Old instance preserved." >&2
+    cd "$TF_DIR" && terraform workspace select "$OLD_WORKSPACE" >/dev/null 2>&1 || true
+    exit 1
+fi
+
+log "Proceeding to destroy old instance."
 
 # ── Step 5: Destroy the old instance ─────────────────────────────────────────
 # --non-interactive skips the interactive 'yes' confirmation prompt, which is
