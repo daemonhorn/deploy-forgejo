@@ -61,6 +61,11 @@ IS_CERT=false
 
 FP="$(_fingerprint "$KEY_TYPE $KEY_B64")"
 
+# SSH_CONNECTION is set by sshd: "client_ip client_port server_ip server_port".
+# Extract client IP for audit log; fall back to "unknown" if unset (e.g. test invocation).
+CLIENT_IP="${SSH_CONNECTION%% *}"
+CLIENT_IP="${CLIENT_IP:-unknown}"
+
 if [[ "${FORGEJO_KEYS_DEBUG:-0}" == "1" ]]; then
     _audit "DEBUG user=$USERNAME kt=$KEY_TYPE fp=$FP is_cert=$IS_CERT"
 fi
@@ -107,18 +112,18 @@ if $IS_CERT; then
             # Format from Forgejo: 'command="...",<opts> <key-type> <key-b64>'
             KEY_LINE="$(printf '%s\n' "$RESULT" | grep -v '^[[:space:]]*#' | head -1)"
             OPTS="${KEY_LINE%% ${BASE_TYPE} *}"
-            _audit "ts=$(date -u +%FT%TZ) user=$USERNAME kt=$KEY_TYPE fp=$FP base_fp=$BASE_FP mode=cert result=ok"
+            _audit "ts=$(date -u +%FT%TZ) client=$CLIENT_IP user=$USERNAME kt=$KEY_TYPE fp=$FP base_fp=$BASE_FP mode=cert result=ok"
             printf 'cert-authority,%s %s\n' "$OPTS" "$CA_LINE"
             exit 0
         else
             # Key not found in Forgejo — do NOT exit 0 with empty stdout (sshd
             # would treat it as "no keys" and fail silently).  Exit 1 explicitly
             # so the audit entry captures the real reason.
-            _audit "ts=$(date -u +%FT%TZ) user=$USERNAME kt=$KEY_TYPE fp=$FP base_fp=$BASE_FP mode=cert result=empty:key_not_registered"
+            _audit "ts=$(date -u +%FT%TZ) client=$CLIENT_IP user=$USERNAME kt=$KEY_TYPE fp=$FP base_fp=$BASE_FP mode=cert result=empty:key_not_registered"
             exit 1
         fi
     else
-        _audit "ts=$(date -u +%FT%TZ) user=$USERNAME kt=$KEY_TYPE fp=$FP mode=cert result=err:extract_failed"
+        _audit "ts=$(date -u +%FT%TZ) client=$CLIENT_IP user=$USERNAME kt=$KEY_TYPE fp=$FP mode=cert result=err:extract_failed"
         exit 1
     fi
 fi
@@ -128,5 +133,5 @@ fi
 # A raw public key alone — even if registered in Forgejo — is insufficient.
 # This ensures an attacker who obtains a user's public key but not a valid
 # CA-signed certificate cannot authenticate. Log and deny unconditionally.
-_audit "ts=$(date -u +%FT%TZ) user=$USERNAME kt=$KEY_TYPE fp=$FP mode=raw result=denied:cert_required"
+_audit "ts=$(date -u +%FT%TZ) client=$CLIENT_IP user=$USERNAME kt=$KEY_TYPE fp=$FP mode=raw result=denied:cert_required"
 exit 1
