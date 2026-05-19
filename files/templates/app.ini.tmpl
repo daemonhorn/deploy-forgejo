@@ -6,6 +6,9 @@ APP_NAME = Forgejo
 ENABLE_PUSH_CREATE_USER      = true
 ; go get uses SSH clone URLs (matches SSH_DOMAIN alias and DISABLE_HTTP_GIT).
 GO_GET_CLONE_URL_PROTOCOL    = SSH
+; Block HTTP(S) git protocol — all git operations must go over SSH.
+; Must be in [repository], not [server] — that is a different (ignored) scope.
+DISABLE_HTTP_GIT             = true
 ; Same for organisation-owned repos.
 ;ENABLE_PUSH_CREATE_ORG  = false
 ; Default branch name for new repos.
@@ -33,8 +36,6 @@ SSH_DOMAIN     = forgejo
 ; USE_COMPAT_SSH_URI = false emits ssh://git@forgejo/user/repo.git (RFC-compliant URI).
 ; The host alias in the generated SSH client config resolves the correct port transparently.
 USE_COMPAT_SSH_URI                = false
-; Block HTTP(S) git protocol — all git operations must go over SSH.
-DISABLE_HTTP_GIT                  = true
 ; SSH handled by host sshd (see sshd_forgejo.conf deployed by deploy.sh).
 ; Forgejo's built-in SSH server is disabled.
 START_SSH_SERVER                  = false
