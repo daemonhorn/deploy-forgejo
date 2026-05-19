@@ -617,6 +617,26 @@ docker exec -u git "$FORGEJO_CONTAINER" \
 info "Admin password set. Retrieve from Vault on your local machine:"
 info "  vault kv get -field=admin_password secret/forgejo/deploy"
 
+# Register admin's SSH public key in Forgejo so cert-based git SSH works immediately.
+# forgejo-keys.sh (cert path) extracts the base key from the cert and looks it up in
+# Forgejo's DB; without this registration it returns result=empty:key_not_registered.
+if [[ -n "${ADMIN_SSH_PUBLIC_KEY:-}" ]]; then
+    info "Registering admin SSH public key in Forgejo..."
+    _key_status="$(curl -s -o /dev/null -w '%{http_code}' \
+        -u "$FORGEJO_ADMIN_USER:$FORGEJO_ADMIN_PASSWORD" \
+        -X POST "http://127.0.0.1:3000/api/v1/user/keys" \
+        -H "Content-Type: application/json" \
+        -d "$(python3 -c "import json,sys; print(json.dumps({'title':'admin-deploy-key','key':sys.argv[1]}))" \
+            "$ADMIN_SSH_PUBLIC_KEY")")"
+    case "$_key_status" in
+        201) info "Admin SSH key registered in Forgejo." ;;
+        422) info "Admin SSH key already registered in Forgejo." ;;
+        *)   warn "Admin SSH key registration returned HTTP $_key_status — check Forgejo logs." ;;
+    esac
+else
+    warn "ADMIN_SSH_PUBLIC_KEY not set — admin SSH key not registered in Forgejo; cert-based git SSH will fail until manually added."
+fi
+
 # ── 12. Start Forgejo sshd ────────────────────────────────────────────────────
 info "Starting Forgejo SSH daemon on port 2222..."
 systemctl start sshd-forgejo

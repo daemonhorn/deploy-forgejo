@@ -71,7 +71,9 @@
 #   To list all known instances: cat .provision-log.json | python3 -m json.tool
 #
 # REQUIREMENTS
-#   git (>= 2.17), curl, python3, ssh, ssh-keyscan, terraform
+#   git (>= 2.17), curl, python3, ssh, ssh-keyscan, ssh-keygen, terraform
+#   Admin SSH key and a valid CA-signed certificate (${SSH_KEY}-cert.pub).
+#   Git operations use SSH (port 2222); HTTPS git is disabled by policy.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -149,8 +151,21 @@ done
 [[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
-validate_external_utils git curl python3 ssh ssh-keyscan
+validate_external_utils git curl python3 ssh ssh-keyscan ssh-keygen
 [[ -f "$SSH_KEY" ]] || error "SSH key not found: $SSH_KEY (set --ssh-key or ADMIN_SSH_KEY)"
+
+# Verify the SSH cert is present and not expired before doing any network work.
+_cert_pub="${SSH_KEY}-cert.pub"
+[[ -f "$_cert_pub" ]] || error "SSH certificate not found: $_cert_pub — run sign-user-key.sh to issue one"
+_cert_exp_str="$(ssh-keygen -L -f "$_cert_pub" 2>/dev/null \
+    | awk '/Valid:/{gsub(/^.*to /,""); print; exit}')" || true
+if [[ -z "$_cert_exp_str" ]]; then
+    error "Cannot parse SSH certificate validity: $_cert_pub"
+fi
+_cert_exp_epoch="$(date -d "${_cert_exp_str//T/ }" +%s 2>/dev/null || true)"
+if [[ -n "$_cert_exp_epoch" && "$(date +%s)" -gt "$_cert_exp_epoch" ]]; then
+    error "SSH certificate expired at ${_cert_exp_str}. Run sign-user-key.sh to renew."
+fi
 
 _ssl_flag=""
 $INSECURE && _ssl_flag="--insecure"
@@ -256,6 +271,24 @@ if [[ -z "$SRC_TOKEN" ]]; then
     fi
     rm -f "$_src_resp" "$_src_kh"
     info "Source admin token obtained."
+fi
+
+# Register the admin SSH public key on the source instance so forgejo-keys.sh
+# cert path can find it in Forgejo's DB (422 = already registered, idempotent).
+_admin_pub_key="$(cat "${SSH_KEY}.pub" 2>/dev/null || true)"
+if [[ -n "$_admin_pub_key" ]]; then
+    _reg_st="$(curl -sS --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
+        -H "Authorization: token $SRC_TOKEN" \
+        -X POST "$SRC_URL/api/v1/user/keys" \
+        -H "Content-Type: application/json" \
+        -d "$(python3 -c "import json,sys; print(json.dumps({'title':'mirror-admin-key','key':sys.argv[1]}))" \
+            "$_admin_pub_key")" \
+        -o /dev/null -w '%{http_code}' 2>/dev/null || true)"
+    case "$_reg_st" in
+        201) info "Admin SSH key registered on source." ;;
+        422) info "Admin SSH key already registered on source." ;;
+        *)   warn "Admin SSH key registration on source returned HTTP ${_reg_st:-?} — cert git auth may fail." ;;
+    esac
 fi
 
 # ── Enumerate source repositories ─────────────────────────────────────────────
@@ -528,11 +561,54 @@ if [[ -z "$DEST_TOKEN" ]]; then
     info "Destination admin token obtained."
 fi
 
+# Register the admin SSH public key on the destination instance (same pattern as source).
+if [[ -n "${_admin_pub_key:-}" ]]; then
+    _reg_dst_st="$(curl -sS --max-time 10 ${_ssl_flag:+"$_ssl_flag"} \
+        -H "Authorization: token $DEST_TOKEN" \
+        -X POST "$DEST_URL/api/v1/user/keys" \
+        -H "Content-Type: application/json" \
+        -d "$(python3 -c "import json,sys; print(json.dumps({'title':'mirror-admin-key','key':sys.argv[1]}))" \
+            "$_admin_pub_key")" \
+        -o /dev/null -w '%{http_code}' 2>/dev/null || true)"
+    case "$_reg_dst_st" in
+        201) info "Admin SSH key registered on destination." ;;
+        422) info "Admin SSH key already registered on destination." ;;
+        *)   warn "Admin SSH key registration on destination returned HTTP ${_reg_dst_st:-?} — cert git auth may fail." ;;
+    esac
+fi
+
+# ── SSH known_hosts for port 2222 (git SSH) ───────────────────────────────────
+# Both source and destination need port-2222 host keys for git clone/push.
+# ssh-keyscan -p 2222 emits "[host]:2222 keytype key" entries usable with UserKnownHostsFile.
+_src_kh_git="$(mktemp)"
+_dest_kh_git="$(mktemp)"
+trap 'rm -f "$_repos_tmp" "$_dest_kh" "$_src_kh_git" "$_dest_kh_git"' EXIT
+
+info "Scanning source SSH host key on port 2222 ($_src_host)..."
+_kh_tries=0
+until ssh-keyscan -p 2222 -T 5 "$(_bare_host "$_src_host")" >> "$_src_kh_git" 2>/dev/null \
+        && [[ -s "$_src_kh_git" ]]; do
+    _kh_tries=$((_kh_tries + 1))
+    [[ "$_kh_tries" -lt 12 ]] || error "Timed out waiting for git SSH on source $_src_host"
+    info "  waiting for git SSH on source... (${_kh_tries}/12)"
+    sleep 10
+done
+
+info "Scanning destination SSH host key on port 2222 ($_dst_host)..."
+_kh_tries=0
+until ssh-keyscan -p 2222 -T 5 "$(_bare_host "$_dst_host")" >> "$_dest_kh_git" 2>/dev/null \
+        && [[ -s "$_dest_kh_git" ]]; do
+    _kh_tries=$((_kh_tries + 1))
+    [[ "$_kh_tries" -lt 12 ]] || error "Timed out waiting for git SSH on destination $_dst_host"
+    info "  waiting for git SSH on destination... (${_kh_tries}/12)"
+    sleep 10
+done
+
 # ── Mirror repositories ───────────────────────────────────────────────────────
 header "Mirroring ${REPO_COUNT} repos: ${SRC_URL} → ${DEST_URL}"
 
 python3 - "$SRC_URL" "$SRC_TOKEN" "$DEST_URL" "$DEST_TOKEN" "$_repos_tmp" \
-    "$INSECURE" "$QUIET" \
+    "$INSECURE" "$QUIET" "$SSH_KEY" "$_src_kh_git" "$_dest_kh_git" "$_src_host" "$_dst_host" \
 <<'PY'
 import json, os, shutil, subprocess, sys, tempfile, urllib.request, urllib.error, ssl
 
@@ -543,6 +619,11 @@ dest_token = sys.argv[4]
 repos_file = sys.argv[5]
 insecure   = sys.argv[6].lower() == "true"
 quiet      = sys.argv[7].lower() == "true"
+ssh_key    = sys.argv[8]
+src_kh     = sys.argv[9]
+dest_kh    = sys.argv[10]
+src_host   = sys.argv[11]
+dest_host  = sys.argv[12]
 
 GREEN  = "\033[0;32m"; YELLOW = "\033[1;33m"; RED = "\033[0;31m"; NC = "\033[0m"
 def info(msg):
@@ -555,6 +636,24 @@ ctx = ssl.create_default_context()
 if insecure:
     ctx.check_hostname = False
     ctx.verify_mode    = ssl.CERT_NONE
+
+def _ssh_url(host, full_name):
+    if ":" in host:  # IPv6 literal — brackets required in SSH URL
+        return f"ssh://git@[{host}]:2222/{full_name}.git"
+    return f"ssh://git@{host}:2222/{full_name}.git"
+
+_ssh_opts_base = (
+    "-o StrictHostKeyChecking=yes -o CanonicalizeHostname=no "
+    "-o ConnectTimeout=15 -o BatchMode=yes"
+)
+src_git_env = {
+    **os.environ,
+    "GIT_SSH_COMMAND": f"ssh -i {ssh_key} -o UserKnownHostsFile={src_kh} {_ssh_opts_base}",
+}
+dest_git_env = {
+    **os.environ,
+    "GIT_SSH_COMMAND": f"ssh -i {ssh_key} -o UserKnownHostsFile={dest_kh} {_ssh_opts_base}",
+}
 
 def api(method, path, payload=None):
     url = f"{dest_url}{path}"
@@ -639,28 +738,25 @@ try:
                 warn(f"    dest repo lookup returned HTTP {code}; skipping {full_name}")
                 fail += 1; continue
 
-        # Clone --mirror from source, push --mirror to destination
-        clone_dir  = os.path.join(work_dir, full_name.replace("/", "__") + ".git")
-        dest_clone = f"{dest_url}/{full_name}.git"
+        # Clone --mirror from source, push --mirror to destination via SSH.
+        # GIT_SSH_COMMAND injects the cert key and per-host known_hosts file;
+        # SSH auto-loads the cert (${ssh_key}-cert.pub) alongside the private key.
+        clone_dir = os.path.join(work_dir, full_name.replace("/", "__") + ".git")
+        src_ssh   = _ssh_url(src_host, full_name)
+        dest_ssh  = _ssh_url(dest_host, full_name)
 
-        git_src  = ["git", "-c", f"http.extraHeader=Authorization: token {src_token}"]
-        git_dest = ["git", "-c", f"http.extraHeader=Authorization: token {dest_token}"]
-        if insecure:
-            git_src  += ["-c", "http.sslVerify=false"]
-            git_dest += ["-c", "http.sslVerify=false"]
-
-        r = subprocess.run(git_src + ["clone", "--mirror", "--quiet", clone_url, clone_dir],
-                           capture_output=True)
+        r = subprocess.run(["git", "clone", "--mirror", "--quiet", src_ssh, clone_dir],
+                           capture_output=True, env=src_git_env)
         if r.returncode != 0:
-            warn(f"    clone failed: {clone_url}")
+            warn(f"    clone failed: {src_ssh}")
             shutil.rmtree(clone_dir, ignore_errors=True)
             fail += 1; continue
 
-        r = subprocess.run(git_dest + ["-C", clone_dir, "push", "--mirror", "--quiet", dest_clone],
-                           capture_output=True)
+        r = subprocess.run(["git", "-C", clone_dir, "push", "--mirror", "--quiet", dest_ssh],
+                           capture_output=True, env=dest_git_env)
         shutil.rmtree(clone_dir, ignore_errors=True)
         if r.returncode != 0:
-            warn(f"    push failed: {dest_clone}")
+            warn(f"    push failed: {dest_ssh}")
             fail += 1; continue
 
         info(f"    ✓ mirrored")
