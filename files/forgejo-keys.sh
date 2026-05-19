@@ -63,7 +63,10 @@ FP="$(_fingerprint "$KEY_TYPE $KEY_B64")"
 
 # SSH_CONNECTION is set by sshd: "client_ip client_port server_ip server_port".
 # Extract client IP for audit log; fall back to "unknown" if unset (e.g. test invocation).
-CLIENT_IP="${SSH_CONNECTION%% *}"
+# Use ${VAR:-} not ${VAR} so set -u does not abort when sshd omits SSH_CONNECTION
+# from the AuthorizedKeysCommand environment (observed on OpenSSH 9.2).
+CLIENT_IP="${SSH_CONNECTION:-}"
+CLIENT_IP="${CLIENT_IP%% *}"
 CLIENT_IP="${CLIENT_IP:-unknown}"
 
 if [[ "${FORGEJO_KEYS_DEBUG:-0}" == "1" ]]; then
