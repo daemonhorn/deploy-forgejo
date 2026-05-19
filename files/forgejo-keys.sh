@@ -124,12 +124,9 @@ if $IS_CERT; then
 fi
 
 # ── Raw key auth path ──────────────────────────────────────────────────────────
-RESULT="$(_forgejo_query "$USERNAME" "$KEY_TYPE" "$KEY_B64")"
-if [[ -n "$RESULT" ]]; then
-    _audit "ts=$(date -u +%FT%TZ) user=$USERNAME kt=$KEY_TYPE fp=$FP mode=raw result=ok"
-    printf '%s\n' "$RESULT"
-    exit 0
-else
-    _audit "ts=$(date -u +%FT%TZ) user=$USERNAME kt=$KEY_TYPE fp=$FP mode=raw result=empty"
-    exit 1
-fi
+# Policy: only CA-signed certificates are accepted for Git-over-SSH.
+# A raw public key alone — even if registered in Forgejo — is insufficient.
+# This ensures an attacker who obtains a user's public key but not a valid
+# CA-signed certificate cannot authenticate. Log and deny unconditionally.
+_audit "ts=$(date -u +%FT%TZ) user=$USERNAME kt=$KEY_TYPE fp=$FP mode=raw result=denied:cert_required"
+exit 1
