@@ -134,9 +134,9 @@ Forgejo's **built-in SSH server is disabled** (`START_SSH_SERVER = false`). A se
 
 ### Auth Policy
 
-- Web login: password auth disabled (`ENABLE_BASIC_AUTHENTICATION = false`)
-- Self-registration: disabled (`DISABLE_REGISTRATION = true`)
-- Git SSH: requires a CA-signed certificate AND the base public key registered in Forgejo
+- Web login: password auth enabled (`ENABLE_BASIC_AUTHENTICATION = true`); password is derived from the user's SSH key by `sign-user-key.sh --web-password` — self-chosen passwords are not accepted
+- Self-registration: disabled (`DISABLE_REGISTRATION = true`); admin must create accounts via `sign-user-key.sh`
+- Git SSH: requires a CA-signed certificate AND the base public key registered in Forgejo; raw key auth unconditionally denied by `forgejo-keys.sh`
 
 ## Critical Files
 
@@ -256,6 +256,6 @@ In `ipv6` mode, `DOMAIN` is the IPv6 address. Let's Encrypt supports IPv6 IP SAN
 
 After deploy, run these to confirm correct configuration:
 1. `ssh-keygen -l -f ca.pub` — fingerprint must match `ykman piv info` slot 9d certificate
-2. Password login attempt at `https://<ip>` → must be rejected
+2. Web login with a random password at `https://<ip>` → must fail; only the `sign-user-key.sh --web-password`-derived password works
 3. `./sign-user-key.sh testuser test_key.pub` → cert issued; Git clone with cert succeeds
-4. Git clone with raw (unsigned) key → rejected by sshd-forgejo (no authorized_keys entry without cert)
+4. Git clone with raw (unsigned) key → rejected by sshd-forgejo; audit log shows `result=denied:cert_required`
