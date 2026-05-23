@@ -694,11 +694,21 @@ fi
 # ── Write SSH client config ────────────────────────────────────────────────────
 # Resolve HostName from FORGEJO_URL if already known; fall back to Terraform
 # output so config files are written even when --no-register is passed.
-_config_host=""
+# Track both address families so known_hosts.forgejo covers dual-stack hosts.
+_config_host_v4=""
+_config_host_v6=""
 if [[ -n "${FORGEJO_URL:-}" ]]; then
-    _config_host="${FORGEJO_URL#https://}"; _config_host="${_config_host#http://}"
-    _config_host="${_config_host%%/*}"; _config_host="${_config_host#[}"; _config_host="${_config_host%]}"
-elif command -v terraform &>/dev/null; then
+    _ch="${FORGEJO_URL#https://}"; _ch="${_ch#http://}"
+    _ch="${_ch%%/*}"; _ch="${_ch#[}"; _ch="${_ch%]}"
+    # IPv6 addresses contain colons; IPv4 addresses and hostnames do not.
+    if [[ "$_ch" == *:* ]]; then
+        _config_host_v6="$_ch"
+    else
+        _config_host_v4="$_ch"
+    fi
+fi
+# Supplement any missing address family from Terraform output.
+if command -v terraform &>/dev/null && [[ -z "$_config_host_v4" || -z "$_config_host_v6" ]]; then
     _last_provider=""; [[ -f "$SCRIPT_DIR/.last-provider" ]] && \
         _last_provider="$(tr -d '[:space:]' < "$SCRIPT_DIR/.last-provider")"
     _ch_dirs=("$SCRIPT_DIR/terraform/vultr")
@@ -706,11 +716,15 @@ elif command -v terraform &>/dev/null; then
         _ch_dirs=("$SCRIPT_DIR/terraform/$_last_provider" "$SCRIPT_DIR/terraform/vultr")
     for _ch_dir in "${_ch_dirs[@]}"; do
         [[ -d "$_ch_dir" ]] || continue
-        _ch="$(cd "$_ch_dir" && terraform output -raw public_ipv4 2>/dev/null || true)"
-        [[ -z "$_ch" ]] && _ch="$(cd "$_ch_dir" && terraform output -raw public_ipv6 2>/dev/null || true)"
-        [[ -n "$_ch" ]] && { _config_host="$_ch"; break; }
+        [[ -z "$_config_host_v4" ]] && \
+            _config_host_v4="$(cd "$_ch_dir" && terraform output -raw public_ipv4 2>/dev/null || true)"
+        [[ -z "$_config_host_v6" ]] && \
+            _config_host_v6="$(cd "$_ch_dir" && terraform output -raw public_ipv6 2>/dev/null || true)"
+        [[ -n "$_config_host_v4" || -n "$_config_host_v6" ]] && break
     done
 fi
+# Primary address for SSH config HostName: IPv4 for ipv4/dual modes, IPv6-only otherwise.
+_config_host="${_config_host_v4:-$_config_host_v6}"
 
 declare -a CONFIG_FILES=()
 declare -a KH_FILES=()
@@ -723,11 +737,26 @@ else
     header "Writing SSH client configs (HostName: $_config_host)..."
     echo
 
-    # Scan host keys once; all users share the same fingerprint.
-    info "Scanning SSH host keys at [$_config_host]:2222..."
-    _kh_content="$(ssh-keyscan -p 2222 -T 10 "$_config_host" 2>/dev/null || true)"
+    # Scan host keys once; all users share the same fingerprints.
+    # Scan every reachable address family so dual-stack clients validate either address.
+    _kh_content=""
+    _scan_labels=()
+    for _scan_addr in ${_config_host_v4:+"$_config_host_v4"} ${_config_host_v6:+"$_config_host_v6"}; do
+        _scan_labels+=("[$_scan_addr]:2222")
+        _kh_part="$(ssh-keyscan -p 2222 -T 10 "$_scan_addr" 2>/dev/null || true)"
+        [[ -n "$_kh_part" ]] && _kh_content+="${_kh_part}"$'\n'
+    done
+    _kh_content="${_kh_content%$'\n'}"
+    info "Scanning SSH host keys at ${_scan_labels[*]}..."
     if [[ -z "$_kh_content" ]]; then
         warn "ssh-keyscan returned nothing — known_hosts.forgejo will be omitted."
+    fi
+
+    # Dual-stack: add a comment in the SSH config so users know the IPv6 alternative.
+    _hostname_comment=""
+    if [[ -n "$_config_host_v4" && -n "$_config_host_v6" ]]; then
+        _hostname_comment="# IPv6 alternative: change HostName to $_config_host_v6
+"
     fi
 
     for i in "${!USERNAMES[@]}"; do
@@ -749,7 +778,12 @@ else
         if [[ -n "$_kh_content" ]]; then
             _kh_out="$OUTPUT_DIR/$username/known_hosts.forgejo"
             {
-                printf '# SSH host fingerprints for forgejo (%s:2222)\n' "$_config_host"
+                if [[ -n "$_config_host_v4" && -n "$_config_host_v6" ]]; then
+                    printf '# SSH host fingerprints for forgejo (IPv4: %s, IPv6: %s, port 2222)\n' \
+                        "$_config_host_v4" "$_config_host_v6"
+                else
+                    printf '# SSH host fingerprints for forgejo (%s:2222)\n' "$_config_host"
+                fi
                 printf '# Place alongside ~/.ssh/config; referenced by UserKnownHostsFile.\n'
                 printf '%s\n' "$_kh_content"
             } > "$_kh_out"
@@ -776,7 +810,7 @@ else
 #       d=bytes.fromhex(sys.stdin.read().split()[0]); \\
 #       print(base64.urlsafe_b64encode(d[:24]).decode().rstrip('='), end='')"
 # ─────────────────────────────────────────────────────────────────────────────
-Host forgejo
+${_hostname_comment}Host forgejo
     HostName $_config_host
     Port 2222
     User git
