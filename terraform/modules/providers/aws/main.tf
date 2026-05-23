@@ -97,8 +97,15 @@ locals {
   allowed_v4_cidrs = [for c in var.allowed_cidrs : c if !strcontains(c, ":")]
   allowed_v6_cidrs = [for c in var.allowed_cidrs : c if strcontains(c, ":")]
 
+  # Split user_cidrs by address family.
+  user_v4_cidrs = [for c in var.user_cidrs : c if !strcontains(c, ":")]
+  user_v6_cidrs = [for c in var.user_cidrs : c if strcontains(c, ":")]
+
   # Ports open to the world (not in admin_only_ports).
   public_ports = [for p in var.firewall_ports : p if !contains(var.admin_only_ports, p)]
+
+  # Ports within admin_only_ports that user CIDRs may also reach (excludes port 22).
+  user_accessible_ports = [for p in var.admin_only_ports : p if !contains([22], p)]
 }
 
 # ── Key pair ──────────────────────────────────────────────────────────────────
@@ -158,6 +165,30 @@ resource "aws_security_group" "main" {
       to_port          = rule.value
       protocol         = "tcp"
       ipv6_cidr_blocks = local.allowed_v6_cidrs
+    }
+  }
+
+  # User-accessible IPv4 ingress — ports 2222 and 443, user CIDR list.
+  dynamic "ingress" {
+    for_each = var.ip_stack != "ipv6" && length(local.user_v4_cidrs) > 0 ? { for p in local.user_accessible_ports : tostring(p) => p } : {}
+    iterator = rule
+    content {
+      from_port   = rule.value
+      to_port     = rule.value
+      protocol    = "tcp"
+      cidr_blocks = local.user_v4_cidrs
+    }
+  }
+
+  # User-accessible IPv6 ingress — ports 2222 and 443, user CIDR list.
+  dynamic "ingress" {
+    for_each = var.ip_stack != "ipv4" && length(local.user_v6_cidrs) > 0 ? { for p in local.user_accessible_ports : tostring(p) => p } : {}
+    iterator = rule
+    content {
+      from_port        = rule.value
+      to_port          = rule.value
+      protocol         = "tcp"
+      ipv6_cidr_blocks = local.user_v6_cidrs
     }
   }
 

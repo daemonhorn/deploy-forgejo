@@ -432,6 +432,7 @@ IP_STACK="ipv4"
 _IP_STACK_EXPLICIT=false
 ADMIN_CIDRS=""
 _ADMIN_CIDRS_EXPLICIT=false
+USER_CIDRS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -479,8 +480,12 @@ while [[ $# -gt 0 ]]; do
             ADMIN_CIDRS="$2"
             _ADMIN_CIDRS_EXPLICIT=true
             shift 2 ;;
+        --user-cidrs)
+            [[ $# -ge 2 ]] || error "--user-cidrs requires a value (comma-separated CIDRs)"
+            USER_CIDRS="$2"
+            shift 2 ;;
         *)
-            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--ip-stack ipv4|ipv6|dual] [--admin-cidrs <cidr,...>] [--debug] [--debug-certbot]" ;;
+            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--ip-stack ipv4|ipv6|dual] [--admin-cidrs <cidr,...>] [--user-cidrs <cidr,...>] [--debug] [--debug-certbot]" ;;
     esac
 done
 
@@ -1062,6 +1067,15 @@ cidrs = [c.strip() for c in '${ADMIN_CIDRS}'.split(',') if c.strip()]
 print('[' + ', '.join('\"' + c + '\"' for c in cidrs) + ']')
 ")"
 
+# user_cidrs: not persisted to tfvars; exported as a JSON array for TF_VAR.
+_user_cidrs_json="$(python3 -c "
+import json
+cidrs = [c.strip() for c in '${USER_CIDRS}'.split(',') if c.strip()]
+print(json.dumps(cidrs))
+")"
+export TF_VAR_user_cidrs="$_user_cidrs_json"
+[[ -n "$USER_CIDRS" ]] && info "User CIDRs (not persisted): $USER_CIDRS"
+
 # Write provider-specific tfvars (workspace-specific file for non-default workspaces).
 case "$PROVIDER" in
     vultr)
@@ -1302,6 +1316,7 @@ _run ssh $SSH_OPTS "${SSH_USER}@${_SSH_HOST}" \
      IP_STACK='${IP_STACK}' \
      IPV6='${IPV6:-}' \
      ADMIN_CIDRS='${ADMIN_CIDRS}' \
+     USER_CIDRS='${USER_CIDRS}' \
      CERTBOT_EMAIL='${CERTBOT_EMAIL}' \
      CERTBOT_STAGING='${CERTBOT_STAGING}' \
      DEBUG='${DEBUG}' \

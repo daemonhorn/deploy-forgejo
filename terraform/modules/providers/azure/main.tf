@@ -86,6 +86,13 @@ locals {
   allowed_v4_cidrs = [for c in var.allowed_cidrs : c if !strcontains(c, ":")]
   allowed_v6_cidrs = [for c in var.allowed_cidrs : c if strcontains(c, ":")]
 
+  # Split user_cidrs by address family.
+  user_v4_cidrs = [for c in var.user_cidrs : c if !strcontains(c, ":")]
+  user_v6_cidrs = [for c in var.user_cidrs : c if strcontains(c, ":")]
+
+  # Ports within admin_only_ports that user CIDRs may also reach (excludes port 22).
+  user_accessible_ports = [for p in var.admin_only_ports : p if !contains([22], p)]
+
   # Ports open to the world (not in admin_only_ports) — priority block 100–199.
   public_port_rules = {
     for idx, port in [for p in var.firewall_ports : p if !contains(var.admin_only_ports, p)] :
@@ -102,6 +109,17 @@ locals {
   admin_v6_port_rules = {
     for idx, port in var.admin_only_ports :
     tostring(port) => { port = port, priority = 220 + idx }
+  }
+
+  # User-accessible ports split by address family.
+  # v4 rules: priority block 240–259; v6 rules: priority block 260–279.
+  user_v4_port_rules = {
+    for idx, port in local.user_accessible_ports :
+    tostring(port) => { port = port, priority = 240 + idx }
+  }
+  user_v6_port_rules = {
+    for idx, port in local.user_accessible_ports :
+    tostring(port) => { port = port, priority = 260 + idx }
   }
 
   # Extract the inline subnet ID from the VNet resource.
@@ -180,6 +198,38 @@ resource "azurerm_network_security_group" "main" {
       source_port_range          = "*"
       destination_port_range     = tostring(security_rule.value.port)
       source_address_prefixes    = local.allowed_v6_cidrs
+      destination_address_prefix = "*"
+    }
+  }
+
+  # User-accessible inbound rules — IPv4 (priority block 240–259).
+  dynamic "security_rule" {
+    for_each = var.ip_stack != "ipv6" && length(local.user_v4_cidrs) > 0 ? local.user_v4_port_rules : {}
+    content {
+      name                       = "allow-user-${security_rule.key}-v4"
+      priority                   = security_rule.value.priority
+      direction                  = "Inbound"
+      access                     = "Allow"
+      protocol                   = "Tcp"
+      source_port_range          = "*"
+      destination_port_range     = tostring(security_rule.value.port)
+      source_address_prefixes    = local.user_v4_cidrs
+      destination_address_prefix = "*"
+    }
+  }
+
+  # User-accessible inbound rules — IPv6 (priority block 260–279).
+  dynamic "security_rule" {
+    for_each = var.ip_stack != "ipv4" && length(local.user_v6_cidrs) > 0 ? local.user_v6_port_rules : {}
+    content {
+      name                       = "allow-user-${security_rule.key}-v6"
+      priority                   = security_rule.value.priority
+      direction                  = "Inbound"
+      access                     = "Allow"
+      protocol                   = "Tcp"
+      source_port_range          = "*"
+      destination_port_range     = tostring(security_rule.value.port)
+      source_address_prefixes    = local.user_v6_cidrs
       destination_address_prefix = "*"
     }
   }

@@ -100,6 +100,21 @@ Use `--debug-certbot` to run certbot against the staging CA (faster iteration; c
 ./provision.sh --provider aws --debug-certbot
 ```
 
+Use `--admin-cidrs` to restrict admin SSH access (ports 22 and 2222) to specific CIDRs. If omitted, `provision.sh` auto-detects the caller's public IPv4 and IPv6 addresses and uses those. The value is persisted in `terraform.tfvars` so re-runs restore it automatically:
+
+```
+./provision.sh --admin-cidrs 203.0.113.5/32
+./provision.sh --admin-cidrs 203.0.113.0/24,2001:db8::/48   # multiple CIDRs comma-separated
+```
+
+Use `--user-cidrs` to open ports 2222 and 443 to CIDRs beyond the admin set — for example, a user subnet that should reach Forgejo over HTTPS and Git SSH, but not the admin SSH port. This flag is **not persisted** and must be supplied on every provision run. When omitted, ports 2222 and 443 are admin-only (fail-closed):
+
+```
+./provision.sh --user-cidrs 198.51.100.0/24
+./provision.sh --user-cidrs 198.51.100.0/24,2001:db8:1::/48   # multiple CIDRs
+./provision.sh --admin-cidrs 203.0.113.5/32 --user-cidrs 198.51.100.0/24   # combined
+```
+
 Use `--debug` to enable verbose execution tracing across all scripts (full bash `set -x` trace + `_run` return code logging):
 
 ```
@@ -541,7 +556,7 @@ The image is Debian 12 (`debian-12` / `12-gen2`) from the official Debian publis
 
 Create `terraform/modules/providers/<name>/` with the same interface as `vultr/` and `aws/`:
 
-- **Inputs**: `ssh_public_key`, `region`, `plan`, `hostname`, `firewall_ports`
+- **Inputs**: `ssh_public_key`, `region`, `plan`, `hostname`, `firewall_ports`, `admin_only_ports`, `allowed_cidrs`, `user_cidrs`, `ip_stack`
 - **Outputs**: `public_ipv4`, `ssh_user`, `instance_id`
 
 Create a corresponding `terraform/<name>/` root directory (`main.tf`, `variables.tf`, `outputs.tf`, `terraform.tfvars.example`) following the pattern of `terraform/aws/`. Add the provider name to the case statement in `provision.sh` (credentials block and `TF_DIR` assignment). No other files need to change.

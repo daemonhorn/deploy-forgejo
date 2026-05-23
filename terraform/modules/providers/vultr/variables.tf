@@ -37,6 +37,12 @@ variable "allowed_cidrs" {
   default     = []
 }
 
+variable "user_cidrs" {
+  description = "CIDRs permitted inbound on user_accessible_ports (2222, 443). Not persisted to tfvars; pass via --user-cidrs on each provision run. Empty list means user ports are admin-only (fail-closed)."
+  type        = list(string)
+  default     = []
+}
+
 variable "ip_stack" {
   description = "IP stack: 'ipv4' (IPv4 only), 'dual' (IPv4 + IPv6), or 'ipv6' (IPv6 only — firewall blocks IPv4, IPv6 used for provisioning and TLS)."
   type        = string

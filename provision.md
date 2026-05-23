@@ -19,6 +19,14 @@ Reads all secrets from the local Vault instance started by `setup.sh`.
 # Dual-stack (IPv4 + IPv6, cert covers both)
 ./provision.sh --ip-stack dual
 
+# Restrict admin ports (22, 2222, 443) to specific CIDRs (auto-detected if omitted)
+./provision.sh --admin-cidrs 203.0.113.5/32
+./provision.sh --admin-cidrs 203.0.113.0/24,2001:db8::/48
+
+# Open ports 2222+443 to user CIDRs (not persisted; admin-only when omitted)
+./provision.sh --user-cidrs 198.51.100.0/24
+./provision.sh --admin-cidrs 203.0.113.5/32 --user-cidrs 198.51.100.0/24
+
 # Second instance in its own workspace
 ./provision.sh --workspace staging
 
@@ -41,12 +49,13 @@ Reads all secrets from the local Vault instance started by `setup.sh`.
 | `--plan PLAN` | Instance size/plan |
 | `--workspace NAME` | Terraform workspace (default: `default`) |
 | `--ip-stack MODE` | `ipv4` (default), `dual`, or `ipv6` |
+| `--admin-cidrs CIDR[,...]` | CIDRs for admin access (ports 22, 2222, 443). Auto-detected from caller's public IP if omitted. Persisted to tfvars. |
+| `--user-cidrs CIDR[,...]` | CIDRs for user access (ports 2222, 443). **Not persisted** — must be supplied on every run. Omitting means ports 2222/443 are admin-only (fail-closed). |
 | `--non-interactive` | Skip all interactive menus; requires `--provider`, `--region`, `--plan` |
 | `--ssh-key FILE` | SSH private key for VPS login (default: `~/.ssh/id_ed25519`) |
 | `--destroy` | Destroy the instance instead of provisioning |
 | `--destroy-all` | Destroy every active instance for the current provider |
 | `--destroy-ip IP` | Look up instance by IP in `.provision-log.json` and destroy it |
-| `--workspace NAME` | Target a specific workspace for `--destroy` |
 | `--debug` | Enable verbose execution tracing (`set -x` + `_run` return codes). Propagates to `deploy.sh` on the VPS via SSH env. |
 | `--debug-certbot` | Run certbot against the staging CA — cert will not be browser-trusted, but useful for testing TLS setup without hitting rate limits. |
 

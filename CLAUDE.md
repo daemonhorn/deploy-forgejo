@@ -23,6 +23,7 @@ Automates deployment of a [Forgejo](https://forgejo.org/) container instance on 
 ./provision.sh --ip-stack ipv6                            # IPv6-only firewall; provisioning and TLS use IPv6
 ./provision.sh --admin-cidrs 203.0.113.5/32               # restrict SSH (22, 2222) to specific CIDR; auto-detected if omitted
 ./provision.sh --admin-cidrs 203.0.113.0/24,2001:db8::/48 # multiple CIDRs comma-separated
+./provision.sh --user-cidrs 198.51.100.0/24               # open ports 2222+443 to user CIDRs (not persisted, must pass each run)
 ```
 
 **Destroy an instance:**
@@ -116,20 +117,23 @@ Forgejo's **built-in SSH server is disabled** (`START_SSH_SERVER = false`). A se
 
 ### Firewall Model (two-layer)
 
-| Layer | Ports 22, 2222 | Ports 80, 443 |
-|---|---|---|
-| Cloud provider firewall | Admin CIDRs only (`allowed_cidrs` in Terraform) | World-open (ACME HTTP-01 needs it) |
-| VM iptables (`DOCKER-USER`) | Not applicable (not Docker-mapped) | Admin CIDRs normally; world-open during certbot renewal |
+| Layer | Port 22 | Ports 2222, 443 | Port 80 |
+|---|---|---|---|
+| Cloud provider firewall | Admin CIDRs only | Admin CIDRs + user CIDRs (if `--user-cidrs` supplied) | World-open (ACME HTTP-01) |
+| VM iptables (`DOCKER-USER`) | Not applicable (not Docker-mapped) | Port 443: admin + user CIDRs; port 2222: not Docker-mapped | Admin CIDRs normally; world-open during certbot renewal |
 
 **Admin CIDRs**: auto-detected on each provision from `ipv4.icanhazip.com` (as /32) and `ipv6.icanhazip.com` (as /64 subnet). Override with `--admin-cidrs <cidr,...>`. Persisted in `terraform.tfvars` so re-runs restore without re-detecting.
 
-**certbot renewal**: `certbot-renew.service` runs `forgejo-fw-open-http.sh` before the ACME challenge (allows all port 80 traffic) and `forgejo-fw-apply.sh` after renewal completes (restores admin-CIDR restriction). Port 443 stays admin-restricted during renewal — nginx serves the ACME response on port 80 only.
+**User CIDRs**: optional, not persisted. Supply with `--user-cidrs <cidr,...>` on each provision run. When present, cloud firewall opens ports 2222 and 443 for user CIDRs (in addition to admin CIDRs), and VM iptables opens port 443 for user CIDRs. When absent, ports 2222 and 443 are admin-only (fail-closed).
+
+**certbot renewal**: `certbot-renew.service` runs `forgejo-fw-open-http.sh` before the ACME challenge (allows all port 80 traffic) and `forgejo-fw-apply.sh` after renewal completes (restores CIDR restrictions). Port 443 stays restricted during renewal — nginx serves the ACME response on port 80 only.
 
 **Boot persistence**: `forgejo-fw.service` (`After=docker.service`) re-applies the DOCKER-USER rules on every boot. Docker flushes iptables chains on daemon restart, so the service must run after Docker is up.
 
 **Key VPS files**:
-- `/etc/forgejo-admin-cidrs` — one CIDR per line; source of truth for the VM-level firewall
-- `/usr/local/bin/forgejo-fw-apply.sh` — applies DOCKER-USER rules for 80/443
+- `/etc/forgejo-admin-cidrs` — one CIDR per line; source of truth for admin VM-level firewall
+- `/etc/forgejo-user-cidrs` — one CIDR per line; present only when `--user-cidrs` was supplied
+- `/usr/local/bin/forgejo-fw-apply.sh` — applies DOCKER-USER rules for ports 80/443
 - `/usr/local/bin/forgejo-fw-open-http.sh` — temporarily opens 80 for certbot
 
 ### Auth Policy

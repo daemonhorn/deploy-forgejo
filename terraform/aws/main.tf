@@ -28,5 +28,6 @@ module "infra" {
   firewall_ports   = var.firewall_ports
   admin_only_ports = var.admin_only_ports
   allowed_cidrs    = var.allowed_cidrs
+  user_cidrs       = var.user_cidrs
   ip_stack         = var.ip_stack
 }
