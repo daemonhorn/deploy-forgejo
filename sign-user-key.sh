@@ -50,6 +50,12 @@ warn()   { echo -e "${YELLOW}[sign]${NC} $*"; }
 error()  { echo -e "${RED}[sign]${NC} $*" >&2; exit 1; }
 header() { echo -e "${CYAN}[sign]${NC} $*"; }
 
+# ── Help ──────────────────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    sed -n '2,/^set -euo pipefail/{/^set -euo pipefail/d; s/^# \?//; p}' "$0"
+    exit 0
+fi
+
 # ── Common prerequisites ───────────────────────────────────────────────────────
 [ -f ca.pub ]      || error "ca.pub not found. Run setup.sh first."
 [ -f .ykcs11_lib ] || error ".ykcs11_lib not found. Run setup.sh first."
@@ -329,6 +335,9 @@ print(json.dumps({
     _SET_WEB_PASS_CODE="${_out##*$'\n'}"
     [[ "$_SET_WEB_PASS_CODE" == "200" ]]
 }
+
+# ── Prerequisites ─────────────────────────────────────────────────────────────
+validate_external_utils ykman openssl ssh-keygen ssh ssh-keyscan curl python3
 
 # ── Single-user mode ──────────────────────────────────────────────────────────
 if [[ "${1:-}" != "--batch" ]]; then

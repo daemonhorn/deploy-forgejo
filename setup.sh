@@ -8,11 +8,29 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[setup]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[setup]${NC} $*"; }
 error() { echo -e "${RED}[setup]${NC} $*" >&2; exit 1; }
+
+# ── CLI arguments ─────────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --debug) DEBUG=1; shift ;;
+        --help|-h)
+            echo "Usage: $0 [--debug]"
+            echo ""
+            echo "Run before first provision. Safe to re-run."
+            echo "  1. Generates Yubikey PIV ECCP384 CA key in slot 9d"
+            echo "  2. Initializes local Vault (file backend)"
+            echo "  3. Stores deployment secrets in Vault for provision.sh"
+            exit 0 ;;
+        *) error "Unknown argument: $1. Use --help for usage." ;;
+    esac
+done
+[[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
 # ── 1. Prerequisite check ─────────────────────────────────────────────────────
 info "Checking prerequisites..."
