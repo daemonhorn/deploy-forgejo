@@ -713,6 +713,9 @@ _destroy_workspace() {
     _run terraform destroy "${destroy_args[@]}" || _tf_rc=$?
     if [[ $_tf_rc -ne 0 ]]; then
         warn "terraform destroy for '${ws}' exited rc=${_tf_rc} — resources may already be gone."
+        warn "Resetting local state for '${ws}' (terraform state rm module.infra)..."
+        terraform state rm 'module.infra' 2>/dev/null || true
+        info "Local state reset complete for '${ws}'."
     fi
 
     # Write log entry before workspace delete so the record exists even if delete fails.
