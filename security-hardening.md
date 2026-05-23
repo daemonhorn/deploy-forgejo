@@ -119,28 +119,39 @@ The `git` system user used for Git-over-SSH is created with:
 
 The system uses a **two-layer firewall model**. Each layer guards different ports.
 
-### 2.1 Layer 1 — Cloud provider firewall (ports 22 and 2222)
+### 2.1 Layer 1 — Cloud provider firewall
 
-Managed by Terraform (`terraform/modules/providers/<name>/`). SSH ports 22 and
-2222 are restricted to `allowed_cidrs` (admin CIDRs) at the cloud network layer
-before traffic even reaches the VPS NIC.
+Managed by Terraform (`terraform/modules/providers/<name>/`). Three access tiers
+exist at the cloud network layer, before traffic reaches the VPS NIC:
 
-**Fail-closed default**: `allowed_cidrs` defaults to `[]` (empty). An empty
-list blocks all admin access at the cloud level. `provision.sh` populates this
-from `--admin-cidrs` or auto-detects the caller's public IPv4/IPv6 on each run.
+| Port(s) | Access | Controlled by |
+|---|---|---|
+| 22 | Admin CIDRs only | `--admin-cidrs` / auto-detected |
+| 2222, 443 | Admin CIDRs + user CIDRs (if `--user-cidrs` supplied) | `--admin-cidrs` + `--user-cidrs` |
+| 80 | World-open | Required for ACME HTTP-01 from Let's Encrypt |
 
-Ports 80 and 443 are world-open at this layer (required for ACME HTTP-01
-certificate issuance from Let's Encrypt).
+**Fail-closed defaults**: `allowed_cidrs` (admin) defaults to `[]` — an empty
+list blocks all admin access at the cloud level. `user_cidrs` also defaults to
+`[]` — ports 2222 and 443 are admin-only unless `--user-cidrs` is explicitly
+supplied. `provision.sh` populates admin CIDRs from `--admin-cidrs` or
+auto-detects the caller's public IPv4/IPv6 on each run. Admin CIDRs are
+persisted in `terraform.tfvars`; user CIDRs are not (they must be re-supplied
+on every provision run).
 
 ### 2.2 Layer 2 — DOCKER-USER iptables chain (ports 80 and 443)
 
 Docker bypasses UFW for container-mapped ports. The `DOCKER-USER` chain
 (which Docker evaluates before its own forwarding rules) is used to restrict
-inbound HTTP/HTTPS to admin CIDRs in steady state.
+inbound HTTP/HTTPS in steady state. Port 80 and 443 are treated separately:
+
+| Port | Admitted CIDRs |
+|---|---|
+| 80 | Admin CIDRs only (world-open only during certbot renewal) |
+| 443 | Admin CIDRs + user CIDRs (combined from `/etc/forgejo-admin-cidrs` and `/etc/forgejo-user-cidrs`) |
 
 **Managed by** `/usr/local/bin/forgejo-fw-apply.sh`, which:
 - Detects the external NIC via `ip route get 1.1.1.1` (e.g. `enp1s0`).
-- Inserts RETURN rules for each admin CIDR on ports 80 and 443.
+- Inserts RETURN rules for admin CIDRs on port 80 and for admin + user CIDRs on port 443.
 - Appends DROP rules **scoped to `-i $EXT_IFACE`** — this limits the drop to
   inbound external traffic only, so container-originated outbound HTTPS
   (e.g. Forgejo repo imports/migrations) is not blocked.
@@ -338,6 +349,7 @@ Two sudoers rules are installed:
 | `/opt/forgejo/.env` | 600 | root:root |
 | `/opt/forgejo/app.ini` | 600 | 1000:1000 (Forgejo container UID) |
 | `/etc/forgejo-admin-cidrs` | 600 | root:root |
+| `/etc/forgejo-user-cidrs` | 600 | root:root (present only when `--user-cidrs` was supplied) |
 | `/etc/ssh/forgejo_ca.pub` | 644 | root:root |
 | `/usr/local/bin/forgejo-keys.sh` | 755 | root:root |
 | `/usr/local/lib/forgejo-cert-extract.py` | 755 | root:root |
