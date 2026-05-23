@@ -54,6 +54,8 @@ declare -A _UTIL_APT_PKG=(
     [ssh-keyscan]="openssh-client"
     [aws]="awscli"
     [ykman]="python3-yubikey-manager"
+    [getcap]="libcap2-bin"
+    [setcap]="libcap2-bin"
 )
 
 # Binary → install note for tools not available via apt.

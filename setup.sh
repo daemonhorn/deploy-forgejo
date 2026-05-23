@@ -34,7 +34,7 @@ done
 
 # ── 1. Prerequisite check ─────────────────────────────────────────────────────
 info "Checking prerequisites..."
-validate_external_utils ykman vault ssh-keygen openssl
+validate_external_utils ykman vault ssh-keygen openssl getcap setcap
 
 ykman info &>/dev/null || error "No Yubikey detected. Connect your Yubikey and try again."
 
@@ -156,14 +156,9 @@ fi
 # requires CAP_IPC_LOCK; without it Vault refuses to start. Grant the capability
 # to the binary once (persists across runs) so Vault never needs to run as root.
 VAULT_BIN="$(command -v vault)"
-if command -v getcap &>/dev/null; then
-    if ! getcap "$VAULT_BIN" 2>/dev/null | grep -q "cap_ipc_lock"; then
-        info "Granting cap_ipc_lock to vault binary (requires sudo, one-time)..."
-        sudo setcap cap_ipc_lock=+ep "$VAULT_BIN"
-    fi
-else
-    warn "getcap not found (install libcap2-bin). If Vault fails to start with an"
-    warn "mlock error, run manually: sudo setcap cap_ipc_lock=+ep $VAULT_BIN"
+if ! getcap "$VAULT_BIN" 2>/dev/null | grep -q "cap_ipc_lock"; then
+    info "Granting cap_ipc_lock to vault binary (requires sudo, one-time)..."
+    sudo setcap cap_ipc_lock=+ep "$VAULT_BIN"
 fi
 
 # vault status exit codes: 0 = unsealed, 2 = sealed, 1 = not running / error.
