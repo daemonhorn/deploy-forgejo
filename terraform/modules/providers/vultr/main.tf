@@ -17,8 +17,15 @@ locals {
   allowed_v4_cidrs = [for c in var.allowed_cidrs : c if !strcontains(c, ":")]
   allowed_v6_cidrs = [for c in var.allowed_cidrs : c if strcontains(c, ":")]
 
+  # Split user_cidrs by address family.
+  user_v4_cidrs = [for c in var.user_cidrs : c if !strcontains(c, ":")]
+  user_v6_cidrs = [for c in var.user_cidrs : c if strcontains(c, ":")]
+
   # Ports open to the world (not in admin_only_ports).
   public_ports = [for p in var.firewall_ports : p if !contains(var.admin_only_ports, p)]
+
+  # Ports within admin_only_ports that user CIDRs may also reach (excludes port 22).
+  user_accessible_ports = [for p in var.admin_only_ports : p if !contains([22], p)]
 
   # Cartesian product maps for admin-restricted rules: key = "port-cidr".
   admin_v4_rules = var.ip_stack != "ipv6" ? {
@@ -32,6 +39,21 @@ locals {
     for pair in setproduct(
       [for p in var.admin_only_ports : tostring(p)],
       local.allowed_v6_cidrs
+    ) : "${pair[0]}-${pair[1]}" => { port = pair[0], cidr = pair[1] }
+  } : {}
+
+  # Cartesian product maps for user-accessible rules: key = "port-cidr".
+  user_v4_rules = var.ip_stack != "ipv6" ? {
+    for pair in setproduct(
+      [for p in local.user_accessible_ports : tostring(p)],
+      local.user_v4_cidrs
+    ) : "${pair[0]}-${pair[1]}" => { port = pair[0], cidr = pair[1] }
+  } : {}
+
+  user_v6_rules = var.ip_stack != "ipv4" ? {
+    for pair in setproduct(
+      [for p in local.user_accessible_ports : tostring(p)],
+      local.user_v6_cidrs
     ) : "${pair[0]}-${pair[1]}" => { port = pair[0], cidr = pair[1] }
   } : {}
 }
@@ -95,6 +117,32 @@ resource "vultr_firewall_rule" "admin_v6" {
   subnet_size       = tonumber(split("/", each.value.cidr)[1])
   port              = each.value.port
   notes             = "port ${each.value.port} admin ${each.value.cidr} IPv6"
+}
+
+# User-accessible IPv4 ingress: one rule per (port, CIDR) pair for ports 2222 and 443.
+resource "vultr_firewall_rule" "user_v4" {
+  for_each = local.user_v4_rules
+
+  firewall_group_id = vultr_firewall_group.main.id
+  protocol          = "tcp"
+  ip_type           = "v4"
+  subnet            = split("/", each.value.cidr)[0]
+  subnet_size       = tonumber(split("/", each.value.cidr)[1])
+  port              = each.value.port
+  notes             = "port ${each.value.port} user ${each.value.cidr}"
+}
+
+# User-accessible IPv6 ingress: one rule per (port, CIDR) pair for ports 2222 and 443.
+resource "vultr_firewall_rule" "user_v6" {
+  for_each = local.user_v6_rules
+
+  firewall_group_id = vultr_firewall_group.main.id
+  protocol          = "tcp"
+  ip_type           = "v6"
+  subnet            = split("/", each.value.cidr)[0]
+  subnet_size       = tonumber(split("/", each.value.cidr)[1])
+  port              = each.value.port
+  notes             = "port ${each.value.port} user ${each.value.cidr} IPv6"
 }
 
 resource "vultr_instance" "main" {

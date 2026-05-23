@@ -2,7 +2,7 @@
 # deploy.sh — Runs on the VPS (as root) to install and start all services.
 #
 # Invoked by provision.sh via SSH. Required env vars (injected by provision.sh):
-#   DOMAIN, IP_STACK, IPV6, ADMIN_CIDRS, CERTBOT_EMAIL, FORGEJO_ADMIN_USER,
+#   DOMAIN, IP_STACK, IPV6, ADMIN_CIDRS, USER_CIDRS, CERTBOT_EMAIL, FORGEJO_ADMIN_USER,
 #   FORGEJO_ADMIN_EMAIL, FORGEJO_ADMIN_PASSWORD, ADMIN_SSH_PUBLIC_KEY
 #
 # Idempotent: each step checks before acting, safe to re-run.
@@ -66,6 +66,7 @@ info "System packages up to date."
 # into the DOCKER chain; those ports are controlled via the DOCKER-USER iptables
 # chain instead, which Docker honours before its own forwarding rules.
 ADMIN_CIDRS="${ADMIN_CIDRS:-}"
+USER_CIDRS="${USER_CIDRS:-}"
 
 if command -v ufw &>/dev/null; then
     info "Configuring UFW firewall rules..."
@@ -85,27 +86,40 @@ if [[ -n "$ADMIN_CIDRS" ]]; then
     info "Admin CIDRs written: $ADMIN_CIDRS"
 fi
 
-# Install forgejo-fw-apply.sh: applies iptables/ip6tables rules for ports
-# 80/443 to restrict them to the admin network in steady state.
+if [[ -n "$USER_CIDRS" ]]; then
+    printf '%s\n' "${USER_CIDRS//,/$'\n'}" | grep -v '^[[:space:]]*$' \
+        > /etc/forgejo-user-cidrs
+    chmod 600 /etc/forgejo-user-cidrs
+    info "User CIDRs written: $USER_CIDRS"
+elif [[ -f /etc/forgejo-user-cidrs ]]; then
+    rm -f /etc/forgejo-user-cidrs
+    info "User CIDRs cleared (--user-cidrs not supplied; port 443/2222 is admin-only)."
+fi
+
+# Install forgejo-fw-apply.sh: applies iptables/ip6tables rules restricting
+# port 80 to admin CIDRs and port 443 to admin+user CIDRs.
 cat > /usr/local/bin/forgejo-fw-apply.sh << 'FWSCRIPT'
 #!/bin/bash
-# Restrict inbound ports 80 and 443 to admin CIDRs.
+# Restrict inbound ports 80 and 443 by CIDR:
+#   port 80  — admin CIDRs only (certbot open script handles ACME validation)
+#   port 443 — admin CIDRs + user CIDRs
 #
 # IPv4: Docker publishes ports via iptables DNAT (PREROUTING) so traffic
 #   reaches containers via the FORWARD chain.  DOCKER-USER sits in FORWARD
 #   and our DROP rules there are effective.
 #
 # IPv6: Docker publishes [::]:80 / [::]:443 via the userland proxy (a host
-#   process), not DNAT.  That means IPv6 connections arrive in the INPUT chain
-#   rather than FORWARD, so DOCKER-USER is never consulted.  We use a dedicated
-#   FORGEJO-INPUT chain hooked into INPUT to catch those connections.
+#   process), not DNAT.  Those connections arrive in INPUT, not FORWARD, so
+#   DOCKER-USER is never consulted.  We use a dedicated FORGEJO-INPUT chain
+#   hooked into INPUT to catch those connections.
 #
 # DROP rules are scoped to the external NIC so container-originated outbound
 # HTTPS (e.g. Forgejo repo migrations/imports) is not blocked.
 #
 # Runs on boot (forgejo-fw.service, after docker.service) and after certbot renewal.
 set -euo pipefail
-CIDRS_FILE="/etc/forgejo-admin-cidrs"
+ADMIN_FILE="/etc/forgejo-admin-cidrs"
+USER_FILE="/etc/forgejo-user-cidrs"
 
 # Detect external interface (the one with the default route to the internet).
 EXT_IFACE=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' || echo "eth0")
@@ -120,20 +134,29 @@ iptables -F DOCKER-USER 2>/dev/null || true
 # Always allow established/related traffic so the flush doesn't cut live sessions.
 iptables -I DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
 
-[[ -f "$CIDRS_FILE" ]] || { echo "[forgejo-fw] No $CIDRS_FILE — skipping port 80/443 restriction."; exit 0; }
+[[ -f "$ADMIN_FILE" ]] || { echo "[forgejo-fw] No $ADMIN_FILE — skipping port 80/443 restriction."; exit 0; }
 
-mapfile -t ALL_CIDRS < <(grep -v '^[[:space:]]*$' "$CIDRS_FILE" || true)
-V4_CIDRS=(); V6_CIDRS=()
-for c in "${ALL_CIDRS[@]}"; do
-    [[ "$c" == *:* ]] && V6_CIDRS+=("$c") || V4_CIDRS+=("$c")
-done
+mapfile -t ALL_ADMIN < <(grep -v '^[[:space:]]*$' "$ADMIN_FILE" || true)
+ALL_USER=()
+[[ -f "$USER_FILE" ]] && mapfile -t ALL_USER < <(grep -v '^[[:space:]]*$' "$USER_FILE" || true)
 
-for port in 80 443; do
-    for cidr in "${V4_CIDRS[@]}"; do
-        iptables -I DOCKER-USER -p tcp --dport "$port" -s "$cidr" -j RETURN
-    done
-    [[ ${#V4_CIDRS[@]} -gt 0 ]] && iptables -A DOCKER-USER -i "$EXT_IFACE" -p tcp --dport "$port" -j DROP
+V4_ADMIN=(); V6_ADMIN=()
+for c in "${ALL_ADMIN[@]}"; do [[ "$c" == *:* ]] && V6_ADMIN+=("$c") || V4_ADMIN+=("$c"); done
+V4_USER=(); V6_USER=()
+for c in "${ALL_USER[@]}"; do [[ "$c" == *:* ]] && V6_USER+=("$c") || V4_USER+=("$c"); done
+
+# Port 80: admin CIDRs only.
+for cidr in "${V4_ADMIN[@]}"; do
+    iptables -I DOCKER-USER -p tcp --dport 80 -s "$cidr" -j RETURN
 done
+[[ ${#V4_ADMIN[@]} -gt 0 ]] && iptables -A DOCKER-USER -i "$EXT_IFACE" -p tcp --dport 80 -j DROP
+
+# Port 443: admin CIDRs + user CIDRs.
+_v4_443=("${V4_ADMIN[@]}" "${V4_USER[@]}")
+for cidr in "${_v4_443[@]}"; do
+    iptables -I DOCKER-USER -p tcp --dport 443 -s "$cidr" -j RETURN
+done
+[[ ${#_v4_443[@]} -gt 0 ]] && iptables -A DOCKER-USER -i "$EXT_IFACE" -p tcp --dport 443 -j DROP
 
 # ── IPv6: FORGEJO-INPUT (INPUT chain) ─────────────────────────────────────────
 # Docker uses userland proxy for IPv6 port bindings; those connections arrive
@@ -143,15 +166,19 @@ ip6tables -N FORGEJO-INPUT 2>/dev/null || ip6tables -F FORGEJO-INPUT
 ip6tables -C INPUT -j FORGEJO-INPUT 2>/dev/null \
     || ip6tables -I INPUT 1 -j FORGEJO-INPUT
 
-if [[ ${#V6_CIDRS[@]} -gt 0 ]]; then
-    # Established connections must not be cut when rules are reloaded.
+_v6_443=("${V6_ADMIN[@]}" "${V6_USER[@]}")
+if [[ ${#_v6_443[@]} -gt 0 ]]; then
     ip6tables -A FORGEJO-INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-    for port in 80 443; do
-        for cidr in "${V6_CIDRS[@]}"; do
-            ip6tables -A FORGEJO-INPUT -p tcp --dport "$port" -s "$cidr" -j ACCEPT
-        done
-        ip6tables -A FORGEJO-INPUT -i "$EXT_IFACE" -p tcp --dport "$port" -j DROP
+    # Port 80: admin CIDRs only.
+    for cidr in "${V6_ADMIN[@]}"; do
+        ip6tables -A FORGEJO-INPUT -p tcp --dport 80 -s "$cidr" -j ACCEPT
     done
+    [[ ${#V6_ADMIN[@]} -gt 0 ]] && ip6tables -A FORGEJO-INPUT -i "$EXT_IFACE" -p tcp --dport 80 -j DROP
+    # Port 443: admin CIDRs + user CIDRs.
+    for cidr in "${_v6_443[@]}"; do
+        ip6tables -A FORGEJO-INPUT -p tcp --dport 443 -s "$cidr" -j ACCEPT
+    done
+    [[ ${#_v6_443[@]} -gt 0 ]] && ip6tables -A FORGEJO-INPUT -i "$EXT_IFACE" -p tcp --dport 443 -j DROP
 fi
 
 # Keep DOCKER-USER IPv6 rules too: if Docker is later switched to ip6tables
@@ -160,14 +187,18 @@ fi
 ip6tables -L DOCKER-USER -n >/dev/null 2>&1 || ip6tables -N DOCKER-USER
 ip6tables -F DOCKER-USER 2>/dev/null || true
 ip6tables -I DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-for port in 80 443; do
-    for cidr in "${V6_CIDRS[@]}"; do
-        ip6tables -I DOCKER-USER -p tcp --dport "$port" -s "$cidr" -j RETURN
-    done
-    [[ ${#V6_CIDRS[@]} -gt 0 ]] && ip6tables -A DOCKER-USER -i "$EXT_IFACE" -p tcp --dport "$port" -j DROP
+# Port 80: admin CIDRs only.
+for cidr in "${V6_ADMIN[@]}"; do
+    ip6tables -I DOCKER-USER -p tcp --dport 80 -s "$cidr" -j RETURN
 done
+[[ ${#V6_ADMIN[@]} -gt 0 ]] && ip6tables -A DOCKER-USER -i "$EXT_IFACE" -p tcp --dport 80 -j DROP
+# Port 443: admin CIDRs + user CIDRs.
+for cidr in "${_v6_443[@]}"; do
+    ip6tables -I DOCKER-USER -p tcp --dport 443 -s "$cidr" -j RETURN
+done
+[[ ${#_v6_443[@]} -gt 0 ]] && ip6tables -A DOCKER-USER -i "$EXT_IFACE" -p tcp --dport 443 -j DROP
 
-echo "[forgejo-fw] Applied admin-CIDR restrictions for ports 80/443 (ext iface: $EXT_IFACE)."
+echo "[forgejo-fw] Applied firewall restrictions for ports 80/443 (ext iface: $EXT_IFACE)."
 FWSCRIPT
 chmod 755 /usr/local/bin/forgejo-fw-apply.sh
 
