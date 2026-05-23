@@ -130,10 +130,23 @@ export VAULT_ADDR="http://127.0.0.1:8200"
 # Stop Vault and wipe all local state so it can be re-initialized from scratch.
 destroy_vault() {
     info "Destroying existing Vault data..."
+    # Kill by PID file first, then sweep for any surviving vault server process.
+    # The PID may be stale (e.g. from a previous crashed run), so we also use
+    # pkill to catch any vault server still bound to 127.0.0.1:8200.
     if [ -f .vault.pid ]; then
         kill "$(cat .vault.pid)" 2>/dev/null || true
-        sleep 1
     fi
+    pkill -f 'vault server' 2>/dev/null || true
+    # Wait up to 10 s for vault to stop responding before wiping data.
+    # Deleting .vault-data while a live process holds the files open causes the
+    # subsequent fresh start to see stale in-memory state (initialized=true with
+    # no on-disk keys), breaking the init/unseal sequence.
+    local _i _vst
+    for _i in $(seq 1 10); do
+        _vst=0; vault status &>/dev/null || _vst=$?
+        [ "$_vst" -eq 1 ] && break
+        sleep 1
+    done
     rm -rf .vault-data/ .vault-keys .vault.token .vault.pid
     info "Vault data destroyed."
 }
