@@ -65,16 +65,16 @@ declare -A _UTIL_MANUAL_PKG=(
 )
 
 # validate_external_utils TOOL [TOOL ...]
-# Verify each TOOL is in PATH. For any that are missing, print a consolidated
-# "sudo apt install ..." line for apt-installable tools and per-tool notes for
-# tools that require manual installation. Returns 1 if anything is missing.
+# Verify each TOOL is reachable (PATH or /usr/sbin fallback). For any that are
+# missing, print a consolidated "sudo apt install ..." line for apt-installable
+# tools and per-tool notes for tools that require manual installation.
 validate_external_utils() {
     local -a _apt=() _manual=()
     local -A _seen=()
     local _cmd _pkg
 
     for _cmd in "$@"; do
-        command -v "$_cmd" &>/dev/null && continue
+        { command -v "$_cmd" &>/dev/null || [[ -x "/usr/sbin/$_cmd" ]]; } && continue
 
         if [[ -n "${_UTIL_APT_PKG[$_cmd]:-}" ]]; then
             _pkg="${_UTIL_APT_PKG[$_cmd]}"

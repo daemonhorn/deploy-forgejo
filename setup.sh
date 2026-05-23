@@ -156,9 +156,11 @@ fi
 # requires CAP_IPC_LOCK; without it Vault refuses to start. Grant the capability
 # to the binary once (persists across runs) so Vault never needs to run as root.
 VAULT_BIN="$(command -v vault)"
-if ! getcap "$VAULT_BIN" 2>/dev/null | grep -q "cap_ipc_lock"; then
+GETCAP="$(command -v getcap 2>/dev/null || echo /usr/sbin/getcap)"
+SETCAP="$(command -v setcap 2>/dev/null || echo /usr/sbin/setcap)"
+if ! "$GETCAP" "$VAULT_BIN" 2>/dev/null | grep -q "cap_ipc_lock"; then
     info "Granting cap_ipc_lock to vault binary (requires sudo, one-time)..."
-    sudo setcap cap_ipc_lock=+ep "$VAULT_BIN"
+    sudo "$SETCAP" cap_ipc_lock=+ep "$VAULT_BIN"
 fi
 
 # vault status exit codes: 0 = unsealed, 2 = sealed, 1 = not running / error.
