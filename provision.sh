@@ -444,7 +444,7 @@ while [[ $# -gt 0 ]]; do
             warn "Certbot staging mode: certificate will be issued by the staging CA (not browser-trusted)."
             shift ;;
         --provider)
-            [[ $# -ge 2 ]] || error "--provider requires a value (vultr|aws|azure)"
+            [[ $# -ge 2 ]] || error "--provider requires a value (vultr|aws|azure|linode|google)"
             PROVIDER="$2"
             shift 2 ;;
         --refresh)
@@ -485,31 +485,31 @@ while [[ $# -gt 0 ]]; do
             USER_CIDRS="$2"
             shift 2 ;;
         *)
-            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--ip-stack ipv4|ipv6|dual] [--admin-cidrs <cidr,...>] [--user-cidrs <cidr,...>] [--debug] [--debug-certbot]" ;;
+            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure|linode|google] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--ip-stack ipv4|ipv6|dual] [--admin-cidrs <cidr,...>] [--user-cidrs <cidr,...>] [--debug] [--debug-certbot]" ;;
     esac
 done
 
 # Activate debug mode after argument parsing so set -x only traces main logic.
 [[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
-if [[ -n "$PROVIDER" && "$PROVIDER" != "vultr" && "$PROVIDER" != "aws" && "$PROVIDER" != "azure" ]]; then
-    error "Invalid provider '$PROVIDER'. Use vultr, aws, or azure."
+if [[ -n "$PROVIDER" && "$PROVIDER" != "vultr" && "$PROVIDER" != "aws" && "$PROVIDER" != "azure" && "$PROVIDER" != "linode" && "$PROVIDER" != "google" ]]; then
+    error "Invalid provider '$PROVIDER'. Use vultr, aws, azure, linode, or google."
 fi
 
 # If not specified, default to last used provider (or prompt)
 if [[ -z "$PROVIDER" ]]; then
     if $NON_INTERACTIVE; then
-        error "--non-interactive requires --provider <vultr|aws|azure>"
+        error "--non-interactive requires --provider <vultr|aws|azure|linode|google>"
     fi
     DEFAULT_PROVIDER="vultr"
     if [[ -f .last-provider ]]; then
         DEFAULT_PROVIDER="$(cat .last-provider | tr -d '[:space:]')"
     fi
 
-    read -rp "[provision] Cloud provider (vultr/aws/azure) [${DEFAULT_PROVIDER}]: " _prov
+    read -rp "[provision] Cloud provider (vultr/aws/azure/linode/google) [${DEFAULT_PROVIDER}]: " _prov
     PROVIDER="${_prov:-$DEFAULT_PROVIDER}"
-    [[ "$PROVIDER" == "vultr" || "$PROVIDER" == "aws" || "$PROVIDER" == "azure" ]] \
-        || error "Invalid provider '$PROVIDER'. Use vultr, aws, or azure."
+    [[ "$PROVIDER" == "vultr" || "$PROVIDER" == "aws" || "$PROVIDER" == "azure" || "$PROVIDER" == "linode" || "$PROVIDER" == "google" ]] \
+        || error "Invalid provider '$PROVIDER'. Use vultr, aws, azure, linode, or google."
 fi
 
 info "Provider: $PROVIDER"
@@ -598,6 +598,38 @@ case "$PROVIDER" in
         export AWS_ACCESS_KEY_ID="$(tr -d '[:space:]' < aws_access_key)"
         export AWS_SECRET_ACCESS_KEY="$(tr -d '[:space:]' < aws_secret_access_key)"
         TF_DIR="$SCRIPT_DIR/terraform/aws"
+        ;;
+    linode)
+        [ -f linode_api_key ] || error "linode_api_key file not found in $SCRIPT_DIR"
+        export LINODE_TOKEN="$(tr -d '[:space:]' < linode_api_key)"
+        TF_DIR="$SCRIPT_DIR/terraform/linode"
+        ;;
+    google)
+        [ -f google_credentials ] || error "google_credentials file not found in $SCRIPT_DIR"
+        # Parse service account JSON to extract project_id and export credentials.
+        # Write exports to a temp file and source it — eval "$(python3 ...)" masks Python's
+        # exit code (eval "" returns 0 even when python3 exits 1), causing silent failures.
+        _google_env="$(mktemp)"
+        python3 - "$_google_env" <<'PY' || error "Cannot load google_credentials — see error above."
+import json, sys, shlex
+try:
+    d = json.load(open("google_credentials"))
+except Exception as e:
+    sys.exit(f"Cannot parse google_credentials: {e}")
+project_id = d.get("project_id", "")
+if not project_id:
+    sys.exit("google_credentials: missing 'project_id'. Ensure this is a valid GCP service account key JSON.")
+cred_type = d.get("type", "")
+if cred_type not in ("service_account", "authorized_user", "external_account"):
+    sys.exit(f"google_credentials: unexpected type '{cred_type}'. Expected service_account JSON from GCP console.")
+with open(sys.argv[1], 'w') as f:
+    f.write(f"export GOOGLE_PROJECT={shlex.quote(project_id)}\n")
+    f.write(f"export GOOGLE_CREDENTIALS={shlex.quote(json.dumps(d))}\n")
+PY
+        # shellcheck disable=SC1090
+        source "$_google_env"
+        rm -f "$_google_env"
+        TF_DIR="$SCRIPT_DIR/terraform/google"
         ;;
     azure)
         [ -f azure_credentials ] || error "azure_credentials file not found in $SCRIPT_DIR"
@@ -1056,6 +1088,92 @@ case "$PROVIDER" in
             PLAN="$_MENU_RESULT"
         fi
         ;;
+    linode)
+        [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="us-east"
+        [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN="g6-nanode-1"
+
+        # Linode regions: static list (no unauthenticated list API with useful labels)
+        REGIONS=(
+            "us-east:Newark, NJ - US East"
+            "us-southeast:Atlanta, GA - US Southeast"
+            "us-central:Dallas, TX - US Central"
+            "us-west:Fremont, CA - US West"
+            "us-lax:Los Angeles, CA - US West"
+            "us-sea:Seattle, WA - US Northwest"
+            "us-mia:Miami, FL - US South"
+            "ca-central:Toronto, Canada"
+            "eu-west:London, UK"
+            "eu-central:Frankfurt, Germany"
+            "ap-south:Singapore"
+            "ap-southeast:Sydney, Australia"
+            "ap-northeast:Tokyo, Japan"
+            "jp-osa:Osaka, Japan"
+            "in-maa:Chennai, India"
+            "br-gru:São Paulo, Brazil"
+        )
+
+        PLANS=(
+            "g6-nanode-1:1C/1GB/25GB SSD    ~\$5/mo   (recommended minimum)"
+            "g6-standard-1:1C/2GB/50GB SSD  ~\$10/mo"
+            "g6-standard-2:2C/4GB/80GB SSD  ~\$20/mo"
+            "g6-standard-4:4C/8GB/160GB SSD ~\$40/mo"
+        )
+
+        if $NON_INTERACTIVE; then
+            [[ -n "$REGION_ARG" ]] || error "--non-interactive requires --region for linode"
+            [[ -n "$PLAN_ARG"   ]] || error "--non-interactive requires --plan for linode"
+            REGION="$REGION_ARG"; PLAN="$PLAN_ARG"
+        else
+            show_menu "Linode regions (static; verify at linode.com/global-infrastructure/):" \
+                "$CURRENT_REGION" "${REGIONS[@]}"
+            REGION="$_MENU_RESULT"
+            show_menu "Linode instance plans (verify at linode.com/pricing/):" \
+                "$CURRENT_PLAN" "${PLANS[@]}"
+            PLAN="$_MENU_RESULT"
+        fi
+        ;;
+    google)
+        [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="us-east1-b"
+        [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN="e2-micro"
+
+        # GCP zones: static list of common zones (provision.sh uses zone as region for GCP).
+        REGIONS=(
+            "us-east1-b:US East - South Carolina"
+            "us-central1-a:US Central - Iowa"
+            "us-west1-b:US West - Oregon"
+            "us-west2-a:US West - Los Angeles"
+            "northamerica-northeast1-b:Canada - Montreal"
+            "europe-west1-b:Europe West - Belgium"
+            "europe-west2-a:Europe West - London"
+            "europe-west3-b:Europe West - Frankfurt"
+            "europe-west4-a:Europe West - Netherlands"
+            "asia-east1-b:Asia East - Taiwan"
+            "asia-northeast1-b:Asia Northeast - Tokyo"
+            "asia-southeast1-b:Asia Southeast - Singapore"
+            "australia-southeast1-b:Australia Southeast - Sydney"
+            "southamerica-east1-b:South America East - São Paulo"
+        )
+
+        PLANS=(
+            "e2-micro:2C shared/1GB    ~\$6/mo   (cheapest; burstable)"
+            "e2-small:2C shared/2GB    ~\$13/mo"
+            "e2-medium:2C shared/4GB   ~\$27/mo"
+            "n2-standard-2:2C/8GB      ~\$62/mo"
+        )
+
+        if $NON_INTERACTIVE; then
+            [[ -n "$REGION_ARG" ]] || error "--non-interactive requires --region for google (use a zone, e.g. us-east1-b)"
+            [[ -n "$PLAN_ARG"   ]] || error "--non-interactive requires --plan for google"
+            REGION="$REGION_ARG"; PLAN="$PLAN_ARG"
+        else
+            show_menu "GCP zones (static; see cloud.google.com/compute/docs/regions-zones):" \
+                "$CURRENT_REGION" "${REGIONS[@]}"
+            REGION="$_MENU_RESULT"
+            show_menu "GCP machine types (pricing approx; verify at cloud.google.com/compute/vm-instance-pricing):" \
+                "$CURRENT_PLAN" "${PLANS[@]}"
+            PLAN="$_MENU_RESULT"
+        fi
+        ;;
 esac
 
 info "Selected: region=${REGION}  plan=${PLAN}"
@@ -1087,7 +1205,7 @@ ip_stack      = "${IP_STACK}"
 allowed_cidrs = ${_allowed_cidrs_hcl}
 EOF
         ;;
-    aws|azure)
+    aws|azure|linode|google)
         cat > "$_ws_tfvars" <<EOF
 region        = "${REGION}"
 plan          = "${PLAN}"

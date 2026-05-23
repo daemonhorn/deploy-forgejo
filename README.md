@@ -28,6 +28,8 @@ You also need cloud provider credentials:
 - **Vultr**: save your API key to a file named `vultr_api_key` in this directory (gitignored)
 - **AWS**: save your access key ID to `aws_access_key` and secret to `aws_secret_access_key` (both gitignored)
 - **Azure**: save a service principal JSON to `azure_credentials` (gitignored) — see the [Azure section](#azure) below for the required format
+- **Linode (Akamai Cloud)**: save your API token to `linode_api_key` (gitignored)
+- **Google Cloud**: save a service account key JSON to `google_credentials` (gitignored) — see the [Google Cloud section](#google-cloud) below for the required format
 
 ## First-time setup
 
@@ -81,7 +83,9 @@ Idempotent. Each run:
 ./provision.sh --provider vultr
 ./provision.sh --provider aws
 ./provision.sh --provider azure
-./provision.sh          # prompts: "Cloud provider (vultr/aws/azure) [vultr]:"
+./provision.sh --provider linode
+./provision.sh --provider google
+./provision.sh          # prompts: "Cloud provider (vultr/aws/azure/linode/google) [vultr]:"
 ```
 
 The last-used provider is saved to `.last-provider` (gitignored) so re-runs default to the same provider without prompting.
@@ -415,10 +419,22 @@ terraform/
     variables.tf
     outputs.tf
     terraform.tfvars.example
+  linode/                       # Linode Terraform root
+    main.tf
+    variables.tf
+    outputs.tf
+    terraform.tfvars.example
+  google/                       # Google Cloud Terraform root
+    main.tf
+    variables.tf
+    outputs.tf
+    terraform.tfvars.example
   modules/providers/
     vultr/                      # Vultr instance, firewall, SSH key
     aws/                        # AWS EC2 instance, security group, key pair
     azure/                      # Azure VM, NSG, VNet, public IP
+    linode/                     # Linode instance, firewall, firewall device
+    google/                     # GCP instance, VPC, firewall rules, static IP
 files/
   docker-compose.yml            # Forgejo, PostgreSQL, nginx, certbot
   sshd_forgejo.conf             # sshd config for port 2222
@@ -517,6 +533,45 @@ The Debian 12 AMI is resolved at apply time via a data source querying the offic
 
 AWS Debian instances default to the `admin` user. The instance `user_data` script copies `admin`'s `authorized_keys` to `root` and enables `PermitRootLogin prohibit-password`, so `provision.sh` can SSH as root consistently across providers.
 
+### Linode (Akamai Cloud)
+
+Credentials in `linode_api_key` file (gitignored). Region and plan are selected interactively during `provision.sh` from a numbered menu.
+
+Default region: `us-east` (Newark, NJ). Default plan: `g6-nanode-1` (1 vCPU, 1 GB RAM, 25 GB SSD — ~$5/month).
+
+Linode always assigns both an IPv4 address and a SLAAC IPv6 /128 address to every instance, regardless of `--ip-stack`. The `ip_stack` setting controls the firewall rules only. `ip_stack = "ipv6"` blocks all inbound IPv4; `ip_stack = "ipv4"` (default) blocks all inbound IPv6. Debian 12 instances boot with root SSH key access — no bootstrap user_data is needed.
+
+**Creating an API token:** go to cloud.linode.com → Profile → API Tokens → Create a Personal Access Token with **Read/Write** scope for Linodes, Firewalls, and SSH Keys. Save the token to `linode_api_key`.
+
+### Google Cloud
+
+Credentials in `google_credentials` (service account key JSON, gitignored). Region and plan are selected interactively during `provision.sh` from a numbered menu.
+
+**Note:** `--region` for Google Cloud is a **zone** (e.g. `us-east1-b`). The module derives the enclosing region automatically for regional resources (static IP address, subnet).
+
+Default zone: `us-east1-b` (South Carolina). Default plan: `e2-micro` (2 vCPU shared, 1 GB RAM — ~$6/month).
+
+A custom VPC is always created (to avoid dependency on the default network). For `dual`/`ipv6` mode, the subnet uses `stack_type = "IPV4_IPV6"` and `ipv6_access_type = "EXTERNAL"`, giving the instance an ephemeral external IPv6 address from the subnet's /64 prefix. Changing `ip_stack` on an existing GCP deployment requires destroy+apply because `ipv6_access_type` is immutable. GCP Debian instances use a bootstrap startup-script to copy the SSH key to root, matching the AWS/Azure pattern.
+
+**Creating a service account:**
+
+```bash
+# Create a service account
+gcloud iam service-accounts create forgejo-deploy \
+  --display-name "Forgejo Deploy"
+
+# Grant it Compute Admin and Service Account User roles
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:forgejo-deploy@PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/compute.admin"
+
+# Create and download the key
+gcloud iam service-accounts keys create google_credentials \
+  --iam-account=forgejo-deploy@PROJECT_ID.iam.gserviceaccount.com
+```
+
+Save the downloaded JSON as `google_credentials` in this directory. The `project_id` field inside the JSON is used automatically to set `GOOGLE_PROJECT`.
+
 ### Azure
 
 Credentials in `azure_credentials` (JSON, gitignored). Region and plan are selected interactively during `provision.sh` from a numbered menu with approximate pricing.
@@ -557,7 +612,7 @@ The image is Debian 12 (`debian-12` / `12-gen2`) from the official Debian publis
 Create `terraform/modules/providers/<name>/` with the same interface as `vultr/` and `aws/`:
 
 - **Inputs**: `ssh_public_key`, `region`, `plan`, `hostname`, `firewall_ports`, `admin_only_ports`, `allowed_cidrs`, `user_cidrs`, `ip_stack`
-- **Outputs**: `public_ipv4`, `ssh_user`, `instance_id`
+- **Outputs**: `public_ipv4`, `public_ipv6`, `ssh_user`, `instance_id`
 
 Create a corresponding `terraform/<name>/` root directory (`main.tf`, `variables.tf`, `outputs.tf`, `terraform.tfvars.example`) following the pattern of `terraform/aws/`. Add the provider name to the case statement in `provision.sh` (credentials block and `TF_DIR` assignment). No other files need to change.
 

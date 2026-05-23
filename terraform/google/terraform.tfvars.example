@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values.
+# admin_ssh_public_key is supplied via TF_VAR_admin_ssh_public_key by provision.sh
+# (read from Vault) — do NOT set it here.
+#
+# GCP credentials: provision.sh reads google_credentials (service account JSON),
+# exports GOOGLE_CREDENTIALS and GOOGLE_PROJECT — do NOT set them here.
+
+region   = "us-east1-b"  # GCP zone; see: cloud.google.com/compute/docs/regions-zones
+plan     = "e2-micro"    # 2 vCPU shared / 1 GB RAM — ~$6/mo; cheapest viable size
+hostname = "forgejo"
