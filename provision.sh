@@ -15,9 +15,12 @@ source "$SCRIPT_DIR/lib/common.sh"
 CACHE_DIR="${SCRIPT_DIR}/.cache"
 CACHE_TTL=86400  # seconds — refresh provider data at most once per day
 
-info()  { echo -e "${GREEN}[provision]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[provision]${NC} $*"; }
-error() { echo -e "${RED}[provision]${NC} $*" >&2; exit 1; }
+_START_TS=$SECONDS
+
+info()    { echo -e "${GREEN}[provision]${NC} $*"; }
+warn()    { echo -e "${YELLOW}[provision]${NC} $*"; }
+error()   { echo -e "${RED}[provision]${NC} $*" >&2; exit 1; }
+_elapsed() { local s=$(( SECONDS - _START_TS )); (( s >= 60 )) && printf '%dm %ds' $(( s/60 )) $(( s%60 )) || printf '%ds' "$s"; }
 
 # ── Region / plan helpers ─────────────────────────────────────────────────────
 
@@ -817,6 +820,7 @@ for r in json.loads(sys.argv[1]):
             fi
         fi
         info "All destroy operations complete."
+        info "Elapsed: $(_elapsed)"
         exit 0
     fi
 
@@ -836,6 +840,7 @@ print(json.dumps(matches[0]) if matches else '')
             _ip_stack="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ip_stack',''))" "$_target")"
             _destroy_workspace "$_ws" "$DESTROY_IP" "$_ipv6" "$_ip_stack"
         fi
+        info "Elapsed: $(_elapsed)"
         exit 0
     fi
 
@@ -887,6 +892,7 @@ print(json.dumps(matches[0]) if matches else '{}')
         _destroy_workspace "$WORKSPACE" "${_existing_ip:-unknown}" "$_existing_ipv6"
     fi
 
+    info "Elapsed: $(_elapsed)"
     exit 0
 fi
 
@@ -1488,4 +1494,6 @@ echo
 echo "  Or set a git URL alias (no SSH config needed):"
 echo "    git config --global url.\"ssh://git@${CONNECT_IP}:2222/\".insteadOf \"forgejo:\""
 echo "  Then clone with:  git clone forgejo:<user>/<repo>"
+echo
+echo "  Elapsed   : $(_elapsed)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

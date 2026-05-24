@@ -81,10 +81,13 @@ cd "$SCRIPT_DIR"
 # shellcheck source=lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
 QUIET=false
-info()   { $QUIET && return 0; echo -e "${GREEN}[mirror]${NC} $*"; }
-warn()   { echo -e "${YELLOW}[mirror]${NC} $*" >&2; }
-error()  { echo -e "${RED}[mirror]${NC} $*" >&2; exit 1; }
-header() { $QUIET && return 0; echo -e "${CYAN}[mirror]${NC} $*"; }
+info()    { $QUIET && return 0; echo -e "${GREEN}[mirror]${NC} $*"; }
+warn()    { echo -e "${YELLOW}[mirror]${NC} $*" >&2; }
+error()   { echo -e "${RED}[mirror]${NC} $*" >&2; exit 1; }
+header()  { $QUIET && return 0; echo -e "${CYAN}[mirror]${NC} $*"; }
+
+_START_TS=$SECONDS
+_elapsed() { local s=$(( SECONDS - _START_TS )); (( s >= 60 )) && printf '%dm %ds' $(( s/60 )) $(( s%60 )) || printf '%ds' "$s"; }
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DAYS=7
@@ -438,6 +441,7 @@ info "Found ${REPO_COUNT} repositories updated in the last ${DAYS} day(s)."
 
 if [[ "$REPO_COUNT" -eq 0 ]]; then
     info "Nothing to mirror."
+    info "Elapsed: $(_elapsed)"
     exit 0
 fi
 
@@ -766,3 +770,4 @@ finally:
 
 print(f"\033[0;36m[mirror]\033[0m Done: {ok} mirrored, {fail} failed.")
 PY
+info "Elapsed: $(_elapsed)"
