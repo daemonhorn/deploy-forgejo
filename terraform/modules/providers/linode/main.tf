@@ -42,7 +42,7 @@ resource "random_password" "root" {
 }
 
 resource "linode_firewall" "main" {
-  label           = "${var.hostname}-fw"
+  label           = "${substr(var.hostname, 0, min(length(var.hostname), 29))}-fw"
   inbound_policy  = "DROP"
   outbound_policy = "ACCEPT"
 
