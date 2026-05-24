@@ -196,9 +196,11 @@ Before running `setup.sh`:
 
 | Provider | Credentials file | Terraform root | Default plan |
 |---|---|---|---|
-| `vultr` | `vultr_api_key` | `terraform/vultr/` | `vc2-1c-0.5gb` |
+| `vultr` | `vultr_api_key` | `terraform/vultr/` | `vc2-1c-1gb` |
 | `aws` | `aws_access_key` + `aws_secret_access_key` | `terraform/aws/` | `t3.micro` |
 | `azure` | `azure_credentials` (JSON) | `terraform/azure/` | `Standard_B1s` |
+| `linode` | `linode_api_key` | `terraform/linode/` | `g6-nanode-1` |
+| `google` | `google_credentials` (service account JSON) | `terraform/google/` | `e2-micro` |
 
 ## Multiple Instances (Terraform Workspaces)
 
@@ -227,7 +229,7 @@ Active instances = those where the latest event per `(provider, workspace)` has 
 
 ## IPv6 Support (`--ip-stack`)
 
-All three providers support three IP stack modes via `--ip-stack <mode>`:
+All five providers support three IP stack modes via `--ip-stack <mode>`:
 
 | Mode | IPv4 firewall | IPv6 firewall | Provisioning/TLS | Notes |
 |---|---|---|---|---|
@@ -242,6 +244,8 @@ All three providers support three IP stack modes via `--ip-stack <mode>`:
 - **Vultr**: `enable_ipv6 = true` adds a second IPv6 address. IPv4 is always physically present. Vultr may assign the IPv6 address asynchronously; `provision.sh` retries the state refresh for up to 90 seconds if the address is empty after `terraform apply`.
 - **AWS**: `ipv4` mode uses the account's default VPC. `dual`/`ipv6` mode creates a dedicated VPC with an Amazon-provided IPv6 /56, an IGW, and route tables (`::/0` → IGW). The default VPC cannot be assigned an IPv6 CIDR via Terraform.
 - **Azure**: A second `azurerm_public_ip` with `ip_version = "IPv6"` is created. The VNet gains a ULA `/48` (`ace:cab:deca::/48`) and subnet a `/64` (`ace:cab:deca:deed::/64`). NSG `source_address_prefix = "*"` already covers both families. Changing `ip_stack` on an existing Azure deployment requires a destroy+apply because `lifecycle { ignore_changes = [subnet] }` prevents in-place subnet prefix updates.
+- **Linode**: Both IPv4 and IPv6 (SLAAC /128) addresses are always assigned by Linode regardless of `ip_stack`. The `ip_stack` setting controls only the firewall rules (`linode_firewall`). IPv6 address is reported as `"addr/128"` and stripped to a bare address in Terraform outputs.
+- **Google**: A custom VPC is always created (avoids dependency on the default network). For `ipv4` mode, the subnet uses `stack_type = "IPV4_ONLY"`. For `dual`/`ipv6` mode, `stack_type = "IPV4_IPV6"` and `ipv6_access_type = "EXTERNAL"` are set on the subnet; the instance receives an ephemeral IPv6 address from the subnet's /64. Changing `ip_stack` on an existing GCP deployment requires destroy+apply because `ipv6_access_type` is immutable. The `region` variable must be a **zone** (e.g. `us-east1-b`); the enclosing region is derived automatically for regional resources (static IPs, subnets).
 
 ### DOMAIN and ROOT_URL
 - `DOMAIN` is always a bare IP address (no brackets), used by nginx `server_name` and certbot `--ip-address`.

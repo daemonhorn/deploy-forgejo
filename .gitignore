@@ -3,6 +3,8 @@ vultr_api_key
 aws_access_key
 aws_secret_access_key
 azure_credentials
+linode_api_key
+google_credentials
 users
 
 # Operational data (instance-specific; not code)
@@ -35,6 +37,10 @@ terraform/azure/.terraform/
 terraform/azure/.terraform.lock.hcl
 terraform/vultr/.terraform/
 terraform/vultr/.terraform.lock.hcl
+terraform/linode/.terraform/
+terraform/linode/.terraform.lock.hcl
+terraform/google/.terraform/
+terraform/google/.terraform.lock.hcl
 
 # Provider selection state
 .last-provider

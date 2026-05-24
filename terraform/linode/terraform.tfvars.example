@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values.
+# Do NOT set linode_api_key here — supply it via LINODE_TOKEN env var (set by provision.sh).
+# admin_ssh_public_key is supplied via TF_VAR_admin_ssh_public_key by provision.sh
+# (read from Vault) — do NOT set it here.
+
+region   = "us-east"     # Newark, NJ; see: linode.com/global-infrastructure/
+plan     = "g6-nanode-1" # 1 vCPU, 1 GB RAM, 25 GB disk — ~$5/mo; smallest viable size
+hostname = "forgejo"
