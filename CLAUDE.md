@@ -176,6 +176,7 @@ Before running `setup.sh`:
 ## Secrets and Security
 
 - `vultr_api_key` file: gitignored; read once by `setup.sh` into Vault
+- All credential files (e.g. `digitalocean_personal_token`, `linode_api_key`): gitignored; on each `provision.sh` run the file is read first (file wins over Vault), immediately backed up to `secret/forgejo/cloud`, and the admin is reminded to delete the file at the end of a successful run. The Vault copy is used on subsequent runs once the file is deleted.
 - `.vault.token`, `.vault-keys`, `.vault-data/`: gitignored; the unseal key in `.vault-keys` must be backed up — loss means Vault cannot be unsealed after reboot
 - `ca_public.pem`: gitignored (regenerate from Yubikey anytime: `ykman piv keys export 9d ca_public.pem`)
 - `ca.pub`: **committed** — it's the CA public key, deployed to VPS
@@ -201,6 +202,9 @@ Before running `setup.sh`:
 | `azure` | `azure_credentials` (JSON) | `terraform/azure/` | `Standard_B1s` |
 | `linode` | `linode_api_key` | `terraform/linode/` | `g6-nanode-1` |
 | `google` | `google_credentials` (service account JSON) | `terraform/google/` | `e2-micro` |
+| `digitalocean` | `digitalocean_personal_token` | `terraform/digitalocean/` | `s-1vcpu-1gb` |
+
+**Credential lifecycle:** `provision.sh` reads credentials from the local file first. If a file is present it is immediately backed up to Vault (`secret/forgejo/cloud`) and the admin is reminded to delete the file after a successful run.
 
 ## Multiple Instances (Terraform Workspaces)
 

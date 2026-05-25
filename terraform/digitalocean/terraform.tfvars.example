@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values.
+# Do NOT set digitalocean_token here — supply it via DIGITALOCEAN_TOKEN env var (set by provision.sh).
+# admin_ssh_public_key is supplied via TF_VAR_admin_ssh_public_key by provision.sh
+# (read from Vault) — do NOT set it here.
+
+region   = "nyc1"         # New York 1; see: slugs.do-api.dev for all region slugs
+plan     = "s-1vcpu-1gb"  # 1 vCPU, 1 GB RAM, 25 GB disk — ~$6/mo; smallest viable size
+hostname = "forgejo"
