@@ -1,6 +1,6 @@
 # lib/credential-manager.sh — provider credential lifecycle helpers.
 # Source this file; do not execute directly.
-# Requires: VAULT_ADDR, VAULT_TOKEN set; error() and warn() from lib/common.sh.
+# Requires: VAULT_ADDR, VAULT_TOKEN set; error() and warn() defined by the calling script.
 
 _CRED_FILES_USED=()   # filenames loaded from disk this run
 _CRED_FIELDS_USED=()  # corresponding Vault field names (parallel array)
