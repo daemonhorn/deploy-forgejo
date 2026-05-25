@@ -489,7 +489,7 @@ while [[ $# -gt 0 ]]; do
             USER_CIDRS="$2"
             shift 2 ;;
         *)
-            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure|linode|google] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--ip-stack ipv4|ipv6|dual] [--admin-cidrs <cidr,...>] [--user-cidrs <cidr,...>] [--debug] [--debug-certbot]" ;;
+            error "Unknown argument: $1. Usage: $0 [--provider vultr|aws|azure|linode|google|digitalocean] [--refresh] [--destroy] [--destroy-ip <ip>] [--destroy-all] [--workspace <name>] [--non-interactive] [--region <r>] [--plan <p>] [--ip-stack ipv4|ipv6|dual] [--admin-cidrs <cidr,...>] [--user-cidrs <cidr,...>] [--debug] [--debug-certbot]" ;;
     esac
 done
 
@@ -612,6 +612,7 @@ case "$PROVIDER" in
         load_credential_json _google_json google_credentials google_credentials
         _google_env="$(mktemp)"
         _google_cred_tmp="$(mktemp)"
+        trap 'rm -f "$_google_env" "$_google_cred_tmp"' EXIT
         printf '%s' "$_google_json" > "$_google_cred_tmp"
         python3 - "$_google_env" "$_google_cred_tmp" <<'PY' || error "Cannot load google_credentials — see error above."
 import json, sys, shlex
@@ -638,6 +639,7 @@ PY
         load_credential_json _azure_json azure_credentials azure_credentials
         _azure_env="$(mktemp)"
         _azure_cred_tmp="$(mktemp)"
+        trap 'rm -f "$_azure_env" "$_azure_cred_tmp"' EXIT
         printf '%s' "$_azure_json" > "$_azure_cred_tmp"
         python3 - "$_azure_env" "$_azure_cred_tmp" <<'PY' || error "Cannot load azure_credentials — see error above."
 import json, sys, shlex
