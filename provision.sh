@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 # shellcheck source=lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
+source "$SCRIPT_DIR/lib/credential-manager.sh"
 CACHE_DIR="${SCRIPT_DIR}/.cache"
 CACHE_TTL=86400  # seconds — refresh provider data at most once per day
 
@@ -447,7 +448,7 @@ while [[ $# -gt 0 ]]; do
             warn "Certbot staging mode: certificate will be issued by the staging CA (not browser-trusted)."
             shift ;;
         --provider)
-            [[ $# -ge 2 ]] || error "--provider requires a value (vultr|aws|azure|linode|google)"
+            [[ $# -ge 2 ]] || error "--provider requires a value (vultr|aws|azure|linode|google|digitalocean)"
             PROVIDER="$2"
             shift 2 ;;
         --refresh)
@@ -495,24 +496,24 @@ done
 # Activate debug mode after argument parsing so set -x only traces main logic.
 [[ "${DEBUG}" == 1 ]] && { export DEBUG; set -x; }
 
-if [[ -n "$PROVIDER" && "$PROVIDER" != "vultr" && "$PROVIDER" != "aws" && "$PROVIDER" != "azure" && "$PROVIDER" != "linode" && "$PROVIDER" != "google" ]]; then
-    error "Invalid provider '$PROVIDER'. Use vultr, aws, azure, linode, or google."
+if [[ -n "$PROVIDER" && "$PROVIDER" != "vultr" && "$PROVIDER" != "aws" && "$PROVIDER" != "azure" && "$PROVIDER" != "linode" && "$PROVIDER" != "google" && "$PROVIDER" != "digitalocean" ]]; then
+    error "Invalid provider '$PROVIDER'. Use vultr, aws, azure, linode, google, or digitalocean."
 fi
 
 # If not specified, default to last used provider (or prompt)
 if [[ -z "$PROVIDER" ]]; then
     if $NON_INTERACTIVE; then
-        error "--non-interactive requires --provider <vultr|aws|azure|linode|google>"
+        error "--non-interactive requires --provider <vultr|aws|azure|linode|google|digitalocean>"
     fi
     DEFAULT_PROVIDER="vultr"
     if [[ -f .last-provider ]]; then
         DEFAULT_PROVIDER="$(cat .last-provider | tr -d '[:space:]')"
     fi
 
-    read -rp "[provision] Cloud provider (vultr/aws/azure/linode/google) [${DEFAULT_PROVIDER}]: " _prov
+    read -rp "[provision] Cloud provider (vultr/aws/azure/linode/google/digitalocean) [${DEFAULT_PROVIDER}]: " _prov
     PROVIDER="${_prov:-$DEFAULT_PROVIDER}"
-    [[ "$PROVIDER" == "vultr" || "$PROVIDER" == "aws" || "$PROVIDER" == "azure" || "$PROVIDER" == "linode" || "$PROVIDER" == "google" ]] \
-        || error "Invalid provider '$PROVIDER'. Use vultr, aws, azure, linode, or google."
+    [[ "$PROVIDER" == "vultr" || "$PROVIDER" == "aws" || "$PROVIDER" == "azure" || "$PROVIDER" == "linode" || "$PROVIDER" == "google" || "$PROVIDER" == "digitalocean" ]] \
+        || error "Invalid provider '$PROVIDER'. Use vultr, aws, azure, linode, google, or digitalocean."
 fi
 
 info "Provider: $PROVIDER"
@@ -592,31 +593,30 @@ export TF_VAR_admin_ssh_public_key="$ADMIN_SSH_PUBLIC_KEY"
 
 case "$PROVIDER" in
     vultr)
-        export TF_VAR_vultr_api_key="$(vget vultr_api_key secret/forgejo/cloud)"
+        load_credential _vultr_token vultr_api_key vultr_api_key
+        export TF_VAR_vultr_api_key="$_vultr_token"
         TF_DIR="$SCRIPT_DIR/terraform/vultr"
         ;;
     aws)
-        [ -f aws_access_key ]        || error "aws_access_key file not found in $SCRIPT_DIR"
-        [ -f aws_secret_access_key ] || error "aws_secret_access_key file not found in $SCRIPT_DIR"
-        export AWS_ACCESS_KEY_ID="$(tr -d '[:space:]' < aws_access_key)"
-        export AWS_SECRET_ACCESS_KEY="$(tr -d '[:space:]' < aws_secret_access_key)"
+        load_credential AWS_ACCESS_KEY_ID aws_access_key aws_access_key
+        load_credential AWS_SECRET_ACCESS_KEY aws_secret_access_key aws_secret_access_key
+        export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
         TF_DIR="$SCRIPT_DIR/terraform/aws"
         ;;
     linode)
-        [ -f linode_api_key ] || error "linode_api_key file not found in $SCRIPT_DIR"
-        export LINODE_TOKEN="$(tr -d '[:space:]' < linode_api_key)"
+        load_credential LINODE_TOKEN linode_api_key linode_api_key
+        export LINODE_TOKEN
         TF_DIR="$SCRIPT_DIR/terraform/linode"
         ;;
     google)
-        [ -f google_credentials ] || error "google_credentials file not found in $SCRIPT_DIR"
-        # Parse service account JSON to extract project_id and export credentials.
-        # Write exports to a temp file and source it — eval "$(python3 ...)" masks Python's
-        # exit code (eval "" returns 0 even when python3 exits 1), causing silent failures.
+        load_credential_json _google_json google_credentials google_credentials
         _google_env="$(mktemp)"
-        python3 - "$_google_env" <<'PY' || error "Cannot load google_credentials — see error above."
+        _google_cred_tmp="$(mktemp)"
+        printf '%s' "$_google_json" > "$_google_cred_tmp"
+        python3 - "$_google_env" "$_google_cred_tmp" <<'PY' || error "Cannot load google_credentials — see error above."
 import json, sys, shlex
 try:
-    d = json.load(open("google_credentials"))
+    d = json.load(open(sys.argv[2]))
 except Exception as e:
     sys.exit(f"Cannot parse google_credentials: {e}")
 project_id = d.get("project_id", "")
@@ -631,20 +631,18 @@ with open(sys.argv[1], 'w') as f:
 PY
         # shellcheck disable=SC1090
         source "$_google_env"
-        rm -f "$_google_env"
+        rm -f "$_google_env" "$_google_cred_tmp"
         TF_DIR="$SCRIPT_DIR/terraform/google"
         ;;
     azure)
-        [ -f azure_credentials ] || error "azure_credentials file not found in $SCRIPT_DIR"
-        # Parse JSON credentials; support both az-cli field names (appId/password/tenant)
-        # and SDK-auth aliases (clientId/clientSecret/tenantId/subscriptionId).
-        # Write exports to a temp file and source it — eval "$(python3 ...)" masks Python's
-        # exit code (eval "" returns 0 even when python3 exits 1), causing silent failures.
+        load_credential_json _azure_json azure_credentials azure_credentials
         _azure_env="$(mktemp)"
-        python3 - "$_azure_env" <<'PY' || error "Cannot load azure_credentials — see error above."
+        _azure_cred_tmp="$(mktemp)"
+        printf '%s' "$_azure_json" > "$_azure_cred_tmp"
+        python3 - "$_azure_env" "$_azure_cred_tmp" <<'PY' || error "Cannot load azure_credentials — see error above."
 import json, sys, shlex
 try:
-    d = json.load(open("azure_credentials"))
+    d = json.load(open(sys.argv[2]))
 except Exception as e:
     sys.exit(f"Cannot parse azure_credentials: {e}")
 def require(key, *aliases):
@@ -678,8 +676,13 @@ with open(sys.argv[1], 'w') as f:
 PY
         # shellcheck disable=SC1090
         source "$_azure_env"
-        rm -f "$_azure_env"
+        rm -f "$_azure_env" "$_azure_cred_tmp"
         TF_DIR="$SCRIPT_DIR/terraform/azure"
+        ;;
+    digitalocean)
+        load_credential DIGITALOCEAN_TOKEN digitalocean_personal_token digitalocean_token
+        export DIGITALOCEAN_TOKEN
+        TF_DIR="$SCRIPT_DIR/terraform/digitalocean"
         ;;
 esac
 
@@ -1496,4 +1499,5 @@ echo "    git config --global url.\"ssh://git@${CONNECT_IP}:2222/\".insteadOf \"
 echo "  Then clone with:  git clone forgejo:<user>/<repo>"
 echo
 echo "  Elapsed   : $(_elapsed)"
+print_credential_reminders
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
