@@ -89,13 +89,13 @@ resource "digitalocean_firewall" "main" {
   # Allow all outbound — required; DigitalOcean Cloud Firewall blocks all egress by default.
   outbound_rule {
     protocol              = "tcp"
-    port_range            = "all"
+    port_range            = "1-65535"
     destination_addresses = ["0.0.0.0/0", "::/0"]
   }
 
   outbound_rule {
     protocol              = "udp"
-    port_range            = "all"
+    port_range            = "1-65535"
     destination_addresses = ["0.0.0.0/0", "::/0"]
   }
 

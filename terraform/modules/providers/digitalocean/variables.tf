@@ -26,9 +26,9 @@ variable "firewall_ports" {
 }
 
 variable "admin_only_ports" {
-  description = "Subset of firewall_ports restricted to allowed_cidrs (default: SSH ports + HTTPS)."
+  description = "Subset of firewall_ports restricted to allowed_cidrs (default: SSH ports only)."
   type        = list(number)
-  default     = [22, 2222, 443]
+  default     = [22, 2222]
 }
 
 variable "allowed_cidrs" {
