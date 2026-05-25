@@ -5,6 +5,7 @@ aws_secret_access_key
 azure_credentials
 linode_api_key
 google_credentials
+digitalocean_personal_token
 users
 
 # Operational data (instance-specific; not code)
@@ -41,6 +42,8 @@ terraform/linode/.terraform/
 terraform/linode/.terraform.lock.hcl
 terraform/google/.terraform/
 terraform/google/.terraform.lock.hcl
+terraform/digitalocean/.terraform/
+terraform/digitalocean/.terraform.lock.hcl
 
 # Provider selection state
 .last-provider
