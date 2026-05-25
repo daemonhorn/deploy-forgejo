@@ -23,7 +23,7 @@ variable "admin_ssh_public_key" {
 }
 
 variable "firewall_ports" {
-  description = "All TCP ports to open inbound. Public ports get 0.0.0.0/0; admin_only_ports get allowed_cidrs."
+  description = "All TCP ports to open inbound. Public ports get 0.0.0.0/0; admin_only_ports get allowed_cidrs; user_cidrs adds user_accessible_ports on top of that."
   type        = list(number)
   default     = [22, 80, 443, 2222]
 }
