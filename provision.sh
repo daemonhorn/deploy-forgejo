@@ -1185,6 +1185,44 @@ case "$PROVIDER" in
             PLAN="$_MENU_RESULT"
         fi
         ;;
+    digitalocean)
+        [[ -z "$CURRENT_REGION" ]] && CURRENT_REGION="nyc1"
+        [[ -z "$CURRENT_PLAN" ]]   && CURRENT_PLAN="s-1vcpu-1gb"
+
+        # DigitalOcean regions: static list (API requires auth token; no unauthenticated endpoint).
+        REGIONS=(
+            "nyc1:New York 1 - US East"
+            "nyc3:New York 3 - US East"
+            "sfo3:San Francisco 3 - US West"
+            "ams3:Amsterdam 3 - EU"
+            "sgp1:Singapore - AP"
+            "lon1:London - EU"
+            "fra1:Frankfurt - EU"
+            "tor1:Toronto - Canada"
+            "blr1:Bangalore - AP"
+            "syd1:Sydney - AU"
+        )
+
+        PLANS=(
+            "s-1vcpu-1gb:1C/1GB/25GB SSD    ~\$6/mo   (recommended minimum)"
+            "s-1vcpu-2gb:1C/2GB/50GB SSD    ~\$12/mo"
+            "s-2vcpu-2gb:2C/2GB/60GB SSD    ~\$18/mo"
+            "s-2vcpu-4gb:2C/4GB/80GB SSD    ~\$24/mo"
+        )
+
+        if $NON_INTERACTIVE; then
+            [[ -n "$REGION_ARG" ]] || error "--non-interactive requires --region for digitalocean"
+            [[ -n "$PLAN_ARG"   ]] || error "--non-interactive requires --plan for digitalocean"
+            REGION="$REGION_ARG"; PLAN="$PLAN_ARG"
+        else
+            show_menu "DigitalOcean regions (static; verify at slugs.do-api.dev):" \
+                "$CURRENT_REGION" "${REGIONS[@]}"
+            REGION="$_MENU_RESULT"
+            show_menu "DigitalOcean droplet sizes (static; verify at slugs.do-api.dev):" \
+                "$CURRENT_PLAN" "${PLANS[@]}"
+            PLAN="$_MENU_RESULT"
+        fi
+        ;;
 esac
 
 info "Selected: region=${REGION}  plan=${PLAN}"
@@ -1216,7 +1254,7 @@ ip_stack      = "${IP_STACK}"
 allowed_cidrs = ${_allowed_cidrs_hcl}
 EOF
         ;;
-    aws|azure|linode|google)
+    aws|azure|linode|google|digitalocean)
         cat > "$_ws_tfvars" <<EOF
 region        = "${REGION}"
 plan          = "${PLAN}"
