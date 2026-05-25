@@ -32,6 +32,7 @@ vault() {
         patch)    $_MOCK_VAULT_PATCH_FAIL && return 1; return 0 ;;
         put)      return 0 ;;
         metadata) $_MOCK_VAULT_METADATA_EXISTS && return 0; return 1 ;;
+        *)        echo "unexpected vault subcommand: $2" >&2; return 1 ;;
     esac
 }
 
@@ -117,6 +118,7 @@ _CRED_FIELDS_USED=("f1" "f2")
 _out=$( print_credential_reminders )
 assert_has  "vault path"    "secret/forgejo/cloud"  "$_out"
 assert_has  "file fa shown" "fa"                    "$_out"
+assert_has  "file fb shown" "fb"                    "$_out"
 assert_has  "rm suggested"  "rm "                   "$_out"
 
 echo "--- print_credential_reminders: empty ---"
